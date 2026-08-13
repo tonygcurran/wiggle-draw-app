@@ -1,0 +1,1224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wiggle layers</title>
+<style>
+  :root{ --ink:#242118; --hair:rgba(36,33,24,.28); --panel:#E7E3D3; }
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  html,body{margin:0}
+  body{
+    min-height:100dvh;background:#DCD8C6;color:var(--ink);
+    font:400 12px/1.45 ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    display:flex;flex-direction:row;align-items:stretch;
+    -webkit-tap-highlight-color:transparent;
+  }
+  #stage{
+    flex:1;display:flex;align-items:center;justify-content:center;
+    padding:24px;min-width:0;min-height:320px;
+  }
+  canvas{
+    display:block;max-width:100%;min-width:120px;min-height:120px;
+    background:#EFEDE4;box-shadow:0 18px 40px rgba(0,0,0,.18);touch-action:manipulation;
+  }
+  canvas.editing{touch-action:none}
+
+  aside{
+    width:300px;flex:0 0 300px;background:var(--panel);
+    border-left:1px solid var(--hair);padding:22px 18px;overflow:auto;
+  }
+  h1{font-size:12px;font-weight:400;letter-spacing:.16em;text-transform:uppercase;margin:0 0 2px}
+  .sub{opacity:.6;margin:0 0 20px;font-size:11px}
+
+  .row{margin:0 0 13px}
+  label{display:flex;justify-content:space-between;gap:8px;margin-bottom:5px;letter-spacing:.04em}
+  label .val{opacity:.55;font-variant-numeric:tabular-nums}
+  input[type=range]{width:100%;accent-color:var(--ink);margin:0;display:block}
+  .hint{font-size:11px;opacity:.5;margin:4px 0 0}
+  .checks{display:flex;flex-direction:column;gap:9px;margin:12px 0}
+  .checks label{justify-content:flex-start;align-items:center;gap:8px;cursor:pointer;margin:0}
+  input[type=checkbox]{accent-color:var(--ink);margin:0}
+
+  #canvasPanel{border-top:1px solid var(--hair)}
+  #panels > details{border-top:1px solid var(--hair)}
+  #panels > details:last-of-type{border-bottom:1px solid var(--hair)}
+  summary{
+    list-style:none;cursor:pointer;padding:11px 0;
+    display:flex;align-items:center;gap:9px;letter-spacing:.05em;
+  }
+  summary::-webkit-details-marker{display:none}
+  summary::after{content:"+";margin-left:auto;opacity:.5;padding-left:8px}
+  details[open] > summary::after{content:"–"}
+  details details{border-left:1px solid var(--hair);margin:0 0 0 3px;padding-left:11px}
+  details details > summary{padding:8px 0;font-size:11px;opacity:.9}
+  .swatch{width:13px;height:13px;flex:none;border:1px solid rgba(36,33,24,.45)}
+  .swatch.line{border-radius:50%}
+  .swatch.frame{background:transparent;border-style:dashed}
+  details details .swatch{width:10px;height:10px}
+  .tag{font-size:10px;letter-spacing:.08em;display:none}
+  .active > summary .tag{display:inline}
+  .off > summary{opacity:.4}
+  .body{padding:2px 0 12px}
+  .add{margin-top:10px}
+  .empty{font-size:11px;opacity:.5;margin:10px 0 0}
+
+  .dims{display:flex;gap:10px;margin-bottom:10px}
+  .dims label{flex:1;display:block;margin:0}
+  .dims .cap{display:block;margin-bottom:4px}
+  .count{display:flex;gap:8px;align-items:flex-end;margin-bottom:5px}
+  input[type=number]{
+    width:100%;font:inherit;padding:5px;background:transparent;
+    border:1px solid var(--hair);color:var(--ink);border-radius:0;
+  }
+  .count input[type=number]{width:64px;padding:3px 5px}
+  .cap{font-size:11px;opacity:.55;white-space:nowrap}
+  input[type=file]{font:inherit;font-size:11px;width:100%;margin:2px 0 10px}
+  select{
+    width:100%;font:inherit;padding:6px 5px;background:transparent;
+    border:1px solid var(--hair);color:var(--ink);border-radius:0;
+  }
+
+  .mini{display:flex;gap:6px;margin-top:10px}
+  .mini button{margin:0;padding:7px 6px;font-size:11px}
+  .mini .arrow{flex:0 0 32px}
+  .buttons{margin-top:18px}
+  button{
+    font:inherit;letter-spacing:.06em;width:100%;padding:9px 10px;margin-bottom:8px;
+    cursor:pointer;background:transparent;color:var(--ink);
+    border:1px solid var(--hair);border-radius:0;
+  }
+  button:hover{background:rgba(36,33,24,.06)}
+  button:disabled{opacity:.3;cursor:default}
+  button:focus-visible,input:focus-visible,summary:focus-visible,select:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+  .note{opacity:.6;font-size:11px;line-height:1.5}
+  code{background:rgba(36,33,24,.07);padding:1px 3px}
+  #dump{
+    display:none;width:100%;height:190px;margin-top:8px;font:inherit;font-size:11px;
+    background:transparent;border:1px solid var(--hair);color:var(--ink);padding:6px;
+  }
+
+  @media (max-width:760px){
+    body{display:block}
+    #stage{padding:0;display:block;text-align:center}
+    canvas{margin:0 auto;box-shadow:none}
+    aside{
+      width:auto;flex:none;border-left:0;border-top:1px solid var(--hair);
+      padding:18px 16px calc(20px + env(safe-area-inset-bottom));overflow:visible;
+    }
+    .checks{display:grid;grid-template-columns:1fr 1fr;gap:12px 14px}
+    input[type=checkbox]{width:20px;height:20px}
+    input[type=range]{height:28px}
+    input[type=number]{padding:9px 6px}
+    .count input[type=number]{padding:8px 6px;width:76px}
+    select{padding:11px 6px}
+    summary{padding:14px 0}
+    details details > summary{padding:11px 0}
+    .buttons{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+    button{margin-bottom:0;padding:13px 10px}
+    #copy,#export,#preview{grid-column:1 / -1}
+    .mini button{padding:11px 6px}
+    .add button{margin-bottom:0;padding:12px 10px}
+  }
+</style>
+</head>
+<body>
+
+<div id="stage">
+  <canvas id="cv" width="600" height="600"></canvas>
+  <noscript style="display:block;padding:24px;font:13px/1.5 ui-monospace,monospace">
+    This page needs JavaScript. The iOS Files preview doesn't run it — open the file in a
+    browser, or host it, and the canvas will appear.
+  </noscript>
+</div>
+<div id="fault" style="display:none;position:fixed;left:0;right:0;top:0;z-index:9999;
+  padding:14px 16px;background:#F3E3E0;border-bottom:1px solid rgba(36,33,24,.28);
+  font:12px/1.5 ui-monospace,monospace"></div>
+
+<script>
+/* Probe: runs before the main script. If the main script fails to parse,
+   nothing in it executes — including its own error handler — so this block
+   is what reports the failure. */
+window.__wiggleFault = function (msg) {
+  var box = document.getElementById('fault');
+  if (!box) return;
+  box.style.display = 'block';
+  box.textContent = msg;
+};
+window.addEventListener('error', function (e) {
+  window.__wiggleFault('Startup error: ' + (e.message || e.error) +
+    (e.lineno ? ' (line ' + e.lineno + ')' : ''));
+});
+setTimeout(function () {
+  if (!window.__wiggleBooted) {
+    window.__wiggleFault('The main script never ran — it failed to parse, or scripts are ' +
+      'blocked in this viewer. Try opening the file in a browser instead.');
+  }
+}, 1200);
+</script>
+
+<aside>
+  <h1>Wiggle layers</h1>
+  <p class="sub">Each layer: one hue, one ground, any number of wiggles.</p>
+
+  <div class="checks">
+    <label><input type="checkbox" id="pts"> anchors (active wiggle)</label>
+  </div>
+
+  <details id="canvasPanel" open>
+    <summary><span class="swatch frame"></span>Canvas &amp; reference</summary>
+    <div class="body">
+      <div class="dims">
+        <label><span class="cap">width cm</span><input type="number" id="cmW" min="1" max="2000" step="0.5" value="60"></label>
+        <label><span class="cap">height cm</span><input type="number" id="cmH" min="1" max="2000" step="0.5" value="60"></label>
+      </div>
+      <button id="swap">Swap orientation</button>
+      <label style="display:block;margin-top:8px"><span class="cap">title</span>
+        <input type="text" id="title" value="Wiggle" style="width:100%;font:inherit;padding:5px;background:transparent;border:1px solid var(--hair);color:var(--ink);border-radius:0">
+      </label>
+      <p class="hint" id="ratio"></p>
+      <div id="refControls">
+        <p class="cap" style="margin:14px 0 0">reference image</p>
+        <input type="file" id="refFile" accept="image/*">
+      </div>
+    </div>
+  </details>
+
+  <p id="status" style="margin:0 0 14px;padding:8px 10px;background:rgba(36,33,24,.06);
+    font:11px/1.4 ui-monospace,monospace">starting…</p>
+
+  <div id="panels"></div>
+
+  <div class="buttons">
+    <button id="export">Export standalone HTML</button>
+    <button id="preview" style="display:none">Preview the export</button>
+    <button id="copy">Copy layers as JS</button>
+    <button id="save">Save PNG</button>
+    <button id="reset">Reset</button>
+  </div>
+  <p class="note" id="exportHelp" style="display:none">
+    <span id="exportName"></span>
+  </p>
+  <textarea id="dump" readonly></textarea>
+
+  <p class="note">
+    Open a wiggle to make it active, switch on anchors, then drag its dots.
+    Keys: <code>a</code> anchors, <code>s</code> save, <code>r</code> reset.
+    On iPhone you can also long-press the canvas to save the image.
+  </p>
+</aside>
+
+<script>
+/* ------------------------------------------------------------------
+   Wiggle layers — the painted gesture as Catmull-Rom spline.
+
+   No libraries, no CDN, no network: everything below is plain canvas
+   2D, so the file works opened straight from disk.
+
+   A Catmull-Rom spline passes THROUGH every anchor, and each anchor's
+   direction comes from its neighbours. The first and last anchors only
+   steer, so both ends are duplicated to push the stroke out to its
+   round caps — the same convention as p5's curveVertex(). Each segment
+   converts exactly to a cubic Bézier, which is what gets drawn.
+
+   Compositing works like paint on acetate. Each layer renders into its
+   own sheet — ground first, wiggles ON TOP of it, all normal blend —
+   and only the finished sheet is composited onto the stack below,
+   using the layer's blend mode.
+
+   Everything is opaque. Colour is one hue per layer with saturation as
+   the only variable, so each layer sits on the white-to-hue line and
+   marks read by saturation contrast, not by transparency.
+
+   Anchors are stored 0–1 in each axis, so they follow the canvas when
+   its proportions change. Stroke weights are scaled by the SHORT side,
+   so a mark keeps its weight when the canvas gets longer.
+   ------------------------------------------------------------------ */
+
+const BRI = 100;   // pinned
+
+/* A new wiggle: three anchors, one mild curve. */
+const DEFAULT_WIGGLE = {
+  sat: 0, w: 0.09,
+  anchors: [[0.26, 0.62], [0.50, 0.40], [0.74, 0.60]]
+};
+
+/* Kept for reference — the traced anchors from the painting. Paste
+   either array over a wiggle's points if you want the original back. */
+const PAINTING_TRACE = {
+  switchback: [
+    [0.115,0.090],[0.330,0.125],[0.500,0.200],[0.585,0.285],
+    [0.575,0.362],[0.470,0.378],[0.270,0.336],[0.095,0.310],
+    [0.068,0.376],[0.152,0.432],[0.332,0.522],[0.480,0.600],
+    [0.562,0.646],[0.600,0.706],[0.545,0.772],[0.400,0.762],
+    [0.232,0.722],[0.112,0.742],[0.076,0.822],[0.132,0.902],
+    [0.182,0.975]
+  ],
+  scurve: [
+    [0.855,0.135],[0.812,0.238],[0.762,0.322],[0.845,0.400],
+    [0.856,0.472],[0.735,0.548],[0.680,0.640],[0.665,0.762],
+    [0.740,0.866],[0.880,0.906],[0.932,0.882]
+  ]
+};
+
+/* Canvas composite modes. 'source-over' is what p5 calls BLEND — the
+   normal, paint-over-the-top mode. The rest are where opaque layers
+   can still interact optically. */
+const BLEND_MODES = [
+  ['source-over', 'normal (BLEND)'], ['multiply', 'multiply'],
+  ['screen', 'screen'], ['overlay', 'overlay'],
+  ['darken', 'darken'], ['lighten', 'lighten'],
+  ['color-burn', 'color burn'], ['color-dodge', 'color dodge'],
+  ['hard-light', 'hard light'], ['soft-light', 'soft light'],
+  ['difference', 'difference'], ['exclusion', 'exclusion'],
+  ['hue', 'hue'], ['saturation', 'saturation'],
+  ['color', 'color'], ['luminosity', 'luminosity']
+];
+
+/* --- tiny maths helpers ---------------------------------------------- */
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const lerp  = (a, b, u) => a + (b - a) * u;
+
+function hash2(x, y) {
+  const n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
+  return n - Math.floor(n);
+}
+function noise2(x, y = 0) {
+  const xi = Math.floor(x), yi = Math.floor(y);
+  const xf = x - xi, yf = y - yi;
+  const sx = xf * xf * (3 - 2 * xf), sy = yf * yf * (3 - 2 * yf);
+  const a = hash2(xi, yi),     b = hash2(xi + 1, yi);
+  const c = hash2(xi, yi + 1), d = hash2(xi + 1, yi + 1);
+  return lerp(lerp(a, b, sx), lerp(c, d, sx), sy);
+}
+function hsv(h, s, v, a = 1) {
+  h = ((h % 360) + 360) % 360; s /= 100; v /= 100;
+  const c = v * s, x = c * (1 - Math.abs((h / 60) % 2 - 1)), m = v - c;
+  let r = 0, g = 0, b = 0;
+  if (h < 60)       { r = c; g = x; }
+  else if (h < 120) { r = x; g = c; }
+  else if (h < 180) { g = c; b = x; }
+  else if (h < 240) { g = x; b = c; }
+  else if (h < 300) { r = x; b = c; }
+  else              { r = c; b = x; }
+  const to = n => Math.round((n + m) * 255);
+  return `rgba(${to(r)}, ${to(g)}, ${to(b)}, ${a})`;
+}
+function hexOf(h, s, v) {
+  const m = hsv(h, s, v).match(/\d+/g);
+  return '#' + [m[0], m[1], m[2]].map(n => (+n).toString(16).padStart(2, '0')).join('');
+}
+
+/* --- canvas ---------------------------------------------------------- */
+let cmW = 60, cmH = 60;                  // the painting, in centimetres
+let W = 600, H = 600, R = 600, DPR = 1;  // pixels; R is the short side
+let cv, ctx, sheetC, sheet, bufC, buf;
+let layers = [], activeId = null, uid = 0, drag = null, t = 0;
+let spread = 0.35, hueStep = 24, newBlend = 'multiply';
+let refImg = null, refOpacity = 0.5, refOnTop = true, refVisible = true;
+let raf = null, resizeTimer = null, lastExport = null;
+const IOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+const EXPORT_LABEL = 'Export standalone HTML';
+const ui = {};
+const COARSE = window.matchMedia('(pointer: coarse)').matches;
+const HIT = COARSE ? 26 : 14;
+const ANCHOR = COARSE ? 15 : 8;
+
+/* Fit the painting's proportions into whatever room the stage has. */
+function fitBox() {
+  const r = document.getElementById('stage').getBoundingClientRect();
+  let availW, availH;
+  if (window.innerWidth <= 760) {
+    availW = r.width;
+    availH = Math.max(260, window.innerHeight * 0.72);
+  } else {
+    availW = r.width - 8; availH = r.height - 8;
+  }
+  if (!(availW > 0)) availW = window.innerWidth || 600;   // container not laid out yet
+  if (!(availH > 0)) availH = window.innerHeight || 600;
+  const scale = Math.min(availW / cmW, availH / cmH);
+  W = Math.max(160, Math.round(cmW * scale));
+  H = Math.max(160, Math.round(cmH * scale));
+  R = Math.min(W, H);
+}
+function sizeCanvas(c, x) {
+  c.width = W * DPR; c.height = H * DPR;
+  c.style.width = W + 'px'; c.style.height = H + 'px';
+  x.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+function makeCanvases() {
+  DPR = Math.min(2, window.devicePixelRatio || 1);
+  sizeCanvas(cv, ctx); sizeCanvas(sheetC, sheet); sizeCanvas(bufC, buf);
+}
+function relayout() {
+  fitBox(); makeCanvases();
+  if (ui.ratio) {
+    const g = (a, b) => b ? g(b, a % b) : a;
+    const d = g(Math.round(cmW * 2), Math.round(cmH * 2)) || 1;
+    ui.ratio.textContent =
+      `${cmW} × ${cmH} cm · ratio ${(Math.round(cmW*2)/d)}:${(Math.round(cmH*2)/d)} · ` +
+      (cmW > cmH ? 'landscape' : cmW < cmH ? 'portrait' : 'square');
+  }
+  render();
+}
+function onResize() {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    const oldW = W, oldH = H;
+    fitBox();
+    if (Math.abs(W - oldW) < 4 && Math.abs(H - oldH) < 4) return;
+    makeCanvases(); render();
+  }, 120);
+}
+
+/* --- state ----------------------------------------------------------- */
+function jitter(pts, amount, seed) {
+  return pts.map((p, i) => amount
+    ? { x: p.x + (noise2(seed + i, 7) - 0.5) * 0.09 * amount,
+        y: p.y + (noise2(seed + i + 99, 7) - 0.5) * 0.09 * amount }
+    : { ...p });
+}
+function makeWiggle(seed) {
+  const base = jitter(DEFAULT_WIGGLE.anchors.map(([x, y]) => ({ x, y })), spread, seed);
+  return {
+    id: ++uid,
+    base, pts: base.map(p => ({ ...p })),
+    n: base.length, maxN: 60,
+    sat: DEFAULT_WIGGLE.sat, w: 1, wBase: DEFAULT_WIGGLE.w,
+    tight: 0, drift: 0, speed: 1, visible: true, open: true,
+    brush: false, load: 0.35, swell: 0.25, bite: 0.30
+  };
+}
+function makeLayer(hue) {
+  return {
+    id: ++uid, hue, blend: 'multiply', visible: true, open: true,
+    ground: { opacity: 1, visible: true, open: false },
+    wiggles: []
+  };
+}
+function resetAll() {
+  uid = 0;
+  layers = [makeLayer(60)];
+  activeId = null;
+}
+function cloneWiggle(w, amount, seed) {
+  const base = jitter(w.base, amount, seed);
+  return { ...w, id: ++uid, base, pts: base.map(p => ({ ...p })), open: false };
+}
+/* A new layer is empty: its own ground in the next hue, no wiggles.
+   Duplicate is there for when you DO want a copy of a layer and its
+   marks — every copy gets fresh point objects, never shared ones. */
+function addLayer() {
+  const src = layers[0];
+  const l = {
+    id: ++uid, hue: (src.hue + hueStep * layers.length) % 360,
+    blend: newBlend, visible: true, open: true,
+    ground: { opacity: src.ground.opacity, visible: true, open: false },
+    wiggles: []
+  };
+  layers.push(l);
+  buildPanels(); syncAll();
+}
+function addWiggle(l) {
+  const w = makeWiggle(uid * 7 + l.wiggles.length * 53);
+  l.wiggles.push(w); activeId = w.id;
+  buildPanels(); syncAll();
+}
+function duplicateLayer(l) {
+  const c = {
+    ...l, id: ++uid, hue: (l.hue + hueStep) % 360, open: true,
+    ground: { ...l.ground, open: false },
+    wiggles: l.wiggles.map(w => cloneWiggle(w, 0, 0))
+  };
+  layers.splice(layers.indexOf(l) + 1, 0, c);
+  if (c.wiggles.length) activeId = c.wiggles[0].id;
+  buildPanels(); syncAll();
+}
+function deleteLayer(l) {
+  if (layers.length <= 1) return;
+  layers.splice(layers.indexOf(l), 1);
+  ensureActive(); buildPanels(); syncAll();
+}
+function moveLayer(l, dir) {
+  const i = layers.indexOf(l), j = i + dir;
+  if (j < 0 || j >= layers.length) return;
+  layers.splice(i, 1); layers.splice(j, 0, l);
+  buildPanels(); syncAll();
+}
+function moveWiggle(l, w, dir) {
+  const i = l.wiggles.indexOf(w), j = i + dir;
+  if (j < 0 || j >= l.wiggles.length) return;
+  l.wiggles.splice(i, 1); l.wiggles.splice(j, 0, w);
+  buildPanels(); syncAll();
+}
+function deleteWiggle(l, w) {
+  l.wiggles.splice(l.wiggles.indexOf(w), 1);
+  ensureActive(); buildPanels(); syncAll();
+}
+function allWiggles() { return layers.flatMap(l => l.wiggles); }
+function ensureActive() {
+  const all = allWiggles();
+  if (!all.some(w => w.id === activeId)) activeId = all.length ? all[0].id : null;
+}
+
+/* --- the curve ------------------------------------------------------- */
+function catmull(p0, p1, p2, p3, u, s) {
+  const f = (1 - s) / 2;                 // tightness, as a tangent scale
+  const m1x = f * (p2.x - p0.x), m1y = f * (p2.y - p0.y);
+  const m2x = f * (p3.x - p1.x), m2y = f * (p3.y - p1.y);
+  const u2 = u * u, u3 = u2 * u;
+  const h00 = 2*u3 - 3*u2 + 1, h10 = u3 - 2*u2 + u;
+  const h01 = -2*u3 + 3*u2,    h11 = u3 - u2;
+  return {
+    x: h00*p1.x + h10*m1x + h01*p2.x + h11*m2x,
+    y: h00*p1.y + h10*m1y + h01*p2.y + h11*m2y
+  };
+}
+/* Catmull-Rom → cubic Bézier, one segment per pair of anchors. */
+function tracePath(x, pts, s) {
+  const pad = [pts[0], ...pts, pts[pts.length - 1]];
+  const f = (1 - s) / 2;
+  x.beginPath();
+  x.moveTo(pad[1].x * W, pad[1].y * H);
+  for (let i = 0; i < pad.length - 3; i++) {
+    const p0 = pad[i], p1 = pad[i+1], p2 = pad[i+2], p3 = pad[i+3];
+    x.bezierCurveTo(
+      (p1.x + f * (p2.x - p0.x) / 3) * W, (p1.y + f * (p2.y - p0.y) / 3) * H,
+      (p2.x - f * (p3.x - p1.x) / 3) * W, (p2.y - f * (p3.y - p1.y) / 3) * H,
+      p2.x * W, p2.y * H
+    );
+  }
+}
+/* Resample to n anchors, evenly spaced along the spline's arc length —
+   measured in pixels, so it stays correct on a non-square canvas. */
+function resample(base, n) {
+  const pad = [base[0], ...base, base[base.length - 1]];
+  const dense = [], acc = [];
+  let len = 0;
+  for (let i = 0; i < pad.length - 3; i++) {
+    for (let k = (i === 0 ? 0 : 1); k <= 30; k++) {
+      const q = catmull(pad[i], pad[i+1], pad[i+2], pad[i+3], k / 30, 0);
+      if (dense.length) {
+        const p = dense[dense.length - 1];
+        len += Math.hypot((q.x - p.x) * W, (q.y - p.y) * H);
+      }
+      dense.push(q); acc.push(len);
+    }
+  }
+  const out = []; let j = 0;
+  for (let i = 0; i < n; i++) {
+    const target = (len * i) / (n - 1);
+    while (j < acc.length - 2 && acc[j + 1] < target) j++;
+    const span = acc[j + 1] - acc[j];
+    const u = span > 0 ? (target - acc[j]) / span : 0;
+    out.push({ x: lerp(dense[j].x, dense[j+1].x, u), y: lerp(dense[j].y, dense[j+1].y, u) });
+  }
+  return out;
+}
+
+/* --- drawing --------------------------------------------------------- */
+function drawReference() {
+  if (!refImg || !refVisible) return;
+  const s = Math.min(W / refImg.width, H / refImg.height);
+  const dw = refImg.width * s, dh = refImg.height * s;
+  ctx.globalAlpha = refOpacity;
+  ctx.drawImage(refImg, (W - dw) / 2, (H - dh) / 2, dw, dh);
+  ctx.globalAlpha = 1;
+}
+
+function render(withRef = true) {
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, W, H);
+
+  if (withRef && !refOnTop) drawReference();
+
+  for (const l of layers) {
+    if (!l.visible) continue;
+
+    // 1. paint the sheet: ground, then wiggles on top of it, all normal
+    sheet.globalCompositeOperation = 'source-over';
+    sheet.globalAlpha = 1;
+    sheet.clearRect(0, 0, W, H);
+    const g = l.ground;
+    if (g.visible) {
+      // grounds are always full saturation — opacity is the only variable,
+      // and it is the only alpha in the system, so nothing compounds with it
+      sheet.globalAlpha = g.opacity;
+      sheet.fillStyle = hsv(l.hue, 100, BRI);
+      sheet.fillRect(0, 0, W, H);
+      sheet.globalAlpha = 1;
+    }
+    for (const w of l.wiggles) {
+      if (!w.visible) continue;
+      const pts = w.pts.map((pt, i) => shift(pt, i, w));
+      if (w.brush) brushStroke(pts, w, l.hue);
+      else splineStroke(pts, w, l.hue);
+    }
+
+    // 2. drop the finished sheet onto everything below it
+    ctx.globalCompositeOperation = l.blend;
+    ctx.drawImage(sheetC, 0, 0, W, H);
+  }
+
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.globalAlpha = 1;
+  if (withRef && refOnTop) drawReference();
+  if (ui.pts && ui.pts.checked) drawAnchors();
+}
+
+function splineStroke(pts, w, hue) {
+  sheet.strokeStyle = hsv(hue, w.sat, BRI);
+  sheet.lineWidth = w.wBase * R * w.w;
+  sheet.lineCap = 'round'; sheet.lineJoin = 'round';
+  tracePath(sheet, pts, w.tight);
+  sheet.stroke();
+}
+
+/* Resampled and stamped at varying width. Three things move the width:
+     load  — the brush starts fat and runs dry (or the reverse)
+     swell — noise-driven thickening and thinning the whole way along
+     bite  — the mark thins where the curve turns hardest, the way a
+             brush does when the hand speeds up through a corner
+   Stamped into a buffer first so the dabs merge into one solid mark. */
+function brushStroke(pts, w, hue) {
+  const pad = [pts[0], ...pts, pts[pts.length - 1]];
+  const base = w.wBase * R * w.w;
+  const segs = pad.length - 3, steps = 40;
+
+  const samples = [];
+  for (let i = 0; i < segs; i++) {
+    for (let k = (i === 0 ? 0 : 1); k <= steps; k++) {
+      samples.push(catmull(pad[i], pad[i+1], pad[i+2], pad[i+3], k / steps, w.tight));
+    }
+  }
+  const n = samples.length;
+  const curv = samples.map((q, i) => {
+    if (i === 0 || i === n - 1) return 0;
+    const a = samples[i-1], b = samples[i+1];
+    const v1x = (q.x - a.x) * W / R, v1y = (q.y - a.y) * H / R;
+    const v2x = (b.x - q.x) * W / R, v2y = (b.y - q.y) * H / R;
+    const l1 = Math.hypot(v1x, v1y), l2 = Math.hypot(v2x, v2y);
+    if (l1 < 1e-9 || l2 < 1e-9) return 0;
+    const cross = (v1x*v2y - v1y*v2x) / (l1*l2);
+    const dot   = (v1x*v2x + v1y*v2y) / (l1*l2);
+    return Math.abs(Math.atan2(cross, dot)) / ((l1 + l2) / 2);
+  });
+
+  buf.globalCompositeOperation = 'source-over';
+  buf.globalAlpha = 1;
+  buf.clearRect(0, 0, W, H);
+  buf.fillStyle = hsv(hue, w.sat, BRI);
+  for (let i = 0; i < n; i++) {
+    const g = i / (n - 1);
+    const load  = 1 + w.load * (0.5 - g) * 1.6;
+    const swell = 1 + w.swell * (noise2(w.id * 11 + g * 7) - 0.5) * 2.4;
+    const bite  = 1 - w.bite * Math.min(1, curv[i] / 24);
+    const d = base * Math.max(0.04, load * swell * bite);
+    buf.beginPath();
+    buf.arc(samples[i].x * W, samples[i].y * H, d / 2, 0, Math.PI * 2);
+    buf.fill();
+  }
+  sheet.drawImage(bufC, 0, 0, W, H);
+}
+
+function shift(pt, i, w) {
+  if (!w.drift) return pt;
+  const s = w.id * 37, u = t * (w.speed || 1);
+  return {
+    x: pt.x + (noise2(s + i, u) - 0.5) * 0.22 * w.drift,
+    y: pt.y + (noise2(s + i + 99, u) - 0.5) * 0.22 * w.drift
+  };
+}
+function anyDrift() {
+  return layers.some(l => l.visible && l.wiggles.some(w => w.drift > 0 && w.visible));
+}
+function activeWiggle() {
+  for (const l of layers) {
+    const w = l.wiggles.find(x => x.id === activeId);
+    if (w) return { l, w };
+  }
+  return null;
+}
+function drawAnchors() {
+  const a = activeWiggle();
+  if (!a) return;
+  const { l, w } = a;
+  ctx.strokeStyle = 'rgba(30,28,20,.35)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  w.pts.forEach((q, i) => i ? ctx.lineTo(q.x * W, q.y * H) : ctx.moveTo(q.x * W, q.y * H));
+  ctx.stroke();
+  for (let i = 0; i < w.pts.length; i++) {
+    const q = w.pts[i];
+    const hot = drag && drag.i === i;
+    ctx.fillStyle = hot ? '#1e1c14' : hsv(l.hue, w.sat, 100);
+    ctx.strokeStyle = '#1e1c14';
+    ctx.beginPath();
+    ctx.arc(q.x * W, q.y * H, (hot ? ANCHOR * 1.35 : ANCHOR) / 2, 0, Math.PI * 2);
+    ctx.fill(); ctx.stroke();
+  }
+}
+
+/* --- animation ------------------------------------------------------- */
+function tick() { t += 0.012; render(); raf = requestAnimationFrame(tick); }
+function refresh() {
+  document.querySelectorAll('#panels details').forEach(d => d._paint && d._paint());
+  if (anyDrift()) {
+    if (!raf) raf = requestAnimationFrame(tick);
+  } else {
+    if (raf) { cancelAnimationFrame(raf); raf = null; }
+    render();
+  }
+}
+
+/* --- editing (active wiggle only) ------------------------------------ */
+function localPoint(e) {
+  const r = cv.getBoundingClientRect();
+  return { x: (e.clientX - r.left) * (W / r.width), y: (e.clientY - r.top) * (H / r.height) };
+}
+function onDown(e) {
+  if (!ui.pts.checked) return;
+  const a = activeWiggle(); if (!a) return;
+  const p = localPoint(e), w = a.w;
+  let best = null, bd = HIT * HIT;
+  for (let i = 0; i < w.pts.length; i++) {
+    const dx = w.pts[i].x * W - p.x, dy = w.pts[i].y * H - p.y;
+    const d2 = dx*dx + dy*dy;
+    if (d2 < bd) { bd = d2; best = { w, i }; }
+  }
+  if (!best) return;
+  drag = best;
+  cv.setPointerCapture && cv.setPointerCapture(e.pointerId);
+  e.preventDefault();
+  render();
+}
+function onMove(e) {
+  if (!drag) return;
+  const p = localPoint(e);
+  drag.w.pts[drag.i].x = clamp(p.x / W, -0.1, 1.1);
+  drag.w.pts[drag.i].y = clamp(p.y / H, -0.1, 1.1);
+  e.preventDefault();
+  render();
+}
+function onUp() {
+  if (!drag) return;
+  drag.w.base = drag.w.pts.map(q => ({ ...q }));
+  drag = null; render();
+}
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  if (e.key === 'a') { ui.pts.checked = !ui.pts.checked; syncAll(); }
+  if (e.key === 's') savePNG();
+  if (e.key === 'r') { resetAll(); buildPanels(); syncAll(); }
+});
+
+/* --- control builders ------------------------------------------------ */
+function slider(parent, label, min, max, step, value, fmt, onInput) {
+  const row = document.createElement('div'); row.className = 'row';
+  const lab = document.createElement('label');
+  const val = document.createElement('span'); val.className = 'val';
+  lab.append(document.createTextNode(label), val);
+  const inp = document.createElement('input');
+  Object.assign(inp, { type:'range', min, max, step, value });
+  const show = () => val.textContent = fmt(+inp.value);
+  inp.addEventListener('input', () => { show(); onInput(+inp.value); });
+  row.append(lab, inp); parent.append(row);
+  show();
+  return inp;
+}
+function check(parent, label, value, onChange) {
+  const wrap = document.createElement('div'); wrap.className = 'checks';
+  const lab = document.createElement('label');
+  const box = document.createElement('input'); box.type = 'checkbox'; box.checked = value;
+  box.addEventListener('change', () => onChange(box.checked));
+  lab.append(box, document.createTextNode(label));
+  wrap.append(lab); parent.append(wrap);
+  return box;
+}
+function select(parent, label, options, value, onChange) {
+  const row = document.createElement('div'); row.className = 'row';
+  const lab = document.createElement('label');
+  lab.append(document.createTextNode(label));
+  const sel = document.createElement('select');
+  for (const [v, txt] of options) {
+    const o = document.createElement('option'); o.value = v; o.textContent = txt;
+    sel.append(o);
+  }
+  sel.value = value;
+  sel.addEventListener('change', () => onChange(sel.value));
+  row.append(lab, sel); parent.append(row);
+  return sel;
+}
+function btn(parent, label, onClick, cls) {
+  const b = document.createElement('button');
+  b.textContent = label;
+  if (cls) b.className = cls;
+  b.addEventListener('click', onClick);
+  parent.append(b);
+  return b;
+}
+function section(host, title, colFn, open, opts = {}) {
+  const d = document.createElement('details'); d.open = open;
+  const s = document.createElement('summary');
+  const sw = document.createElement('span');
+  sw.className = 'swatch' + (opts.kind === 'line' ? ' line' : '');
+  s.append(sw, document.createTextNode(title));
+  if (opts.tag) {
+    const tag = document.createElement('span'); tag.className = 'tag'; tag.textContent = 'editing';
+    s.append(tag);
+  }
+  // records open/closed state — note this also fires on a rebuild
+  d.addEventListener('toggle', () => { if (opts.onToggle) opts.onToggle(d.open); });
+  // selection must come from a real click, never from a programmatic open
+  if (opts.onOpen) s.addEventListener('click', () => { opts.onOpen(); refresh(); });
+  const body = document.createElement('div'); body.className = 'body';
+  d.append(s, body); host.append(d);
+  d._paint = () => {
+    sw.style.background = colFn();
+    d.classList.toggle('active', !!(opts.isActive && opts.isActive()));
+    d.classList.toggle('off', !!(opts.isOff && opts.isOff()));
+  };
+  return body;
+}
+
+/* --- panels ---------------------------------------------------------- */
+function buildPanels() {
+  const host = document.getElementById('panels');
+  host.innerHTML = '';
+
+  const nv = section(host, 'New layers & wiggles', () => hexOf(hueStep % 360, 80, BRI), false);
+  slider(nv, 'anchor spread', 0, 1, 0.01, spread, v => v.toFixed(2), v => { spread = v; });
+  slider(nv, 'hue step', 0, 180, 1, hueStep, v => v.toFixed(0) + '°', v => { hueStep = v; refresh(); });
+  select(nv, 'blend mode', BLEND_MODES, newBlend, v => { newBlend = v; });
+  const nh = document.createElement('p'); nh.className = 'hint';
+  nh.textContent = 'A new layer is empty: its own ground in the next hue, no wiggles. Grounds are opaque — uncheck a ground to let the layers below show through.';
+  nv.append(nh);
+
+  layers.forEach((l, li) => {
+    const body = section(host, 'Layer ' + (li + 1), () => hexOf(l.hue, 100, BRI), l.open, {
+      onToggle: o => l.open = o,
+      isOff: () => !l.visible
+    });
+
+    slider(body, 'hue (whole layer)', 0, 360, 1, l.hue, v => v.toFixed(0), v => { l.hue = v; refresh(); });
+    select(body, 'blend onto layers below', BLEND_MODES, l.blend, v => { l.blend = v; refresh(); });
+    check(body, 'layer visible', l.visible, v => { l.visible = v; refresh(); });
+
+    const g = l.ground;
+    const gb = section(body, 'Ground', () => hexOf(l.hue, 100, BRI), g.open, {
+      onToggle: o => g.open = o,
+      isOff: () => !g.visible
+    });
+    slider(gb, 'opacity', 0, 1, 0.01, g.opacity, v => v.toFixed(2), v => { g.opacity = v; refresh(); });
+    const gh = document.createElement('p'); gh.className = 'hint';
+    gh.textContent = 'Full saturation, always. At 1 the ground covers; below that the layers underneath show through it.';
+    gb.append(gh);
+    check(gb, 'visible', g.visible, v => { g.visible = v; refresh(); });
+
+    l.wiggles.forEach((w, wi) => {
+      const wb = section(body, 'Wiggle ' + (wi + 1), () => hexOf(l.hue, w.sat, BRI), w.open, {
+        kind: 'line', tag: true,
+        onToggle: o => w.open = o,
+        onOpen: () => activeId = w.id,
+        isActive: () => w.id === activeId,
+        isOff: () => !w.visible
+      });
+
+      slider(wb, 'saturation', 0, 100, 1, w.sat, v => v.toFixed(0), v => { w.sat = v; refresh(); });
+      slider(wb, 'stroke weight', 0.02, 5, 0.01, w.w, v => v.toFixed(2) + '×', v => { w.w = v; refresh(); });
+      slider(wb, 'curve tightness', -2, 1, 0.01, w.tight, v => v.toFixed(2), v => { w.tight = v; refresh(); });
+      slider(wb, 'drift', 0, 1, 0.01, w.drift, v => v.toFixed(2), v => { w.drift = v; refresh(); });
+      slider(wb, 'drift speed', 0.05, 4, 0.05, w.speed, v => v.toFixed(2) + '×', v => { w.speed = v; refresh(); });
+
+      check(wb, 'loaded brush', w.brush, v => { w.brush = v; refresh(); });
+      slider(wb, 'brush load', -1, 1, 0.01, w.load, v => v.toFixed(2), v => { w.load = v; refresh(); });
+      slider(wb, 'brush swell', 0, 1, 0.01, w.swell, v => v.toFixed(2), v => { w.swell = v; refresh(); });
+      slider(wb, 'brush bite', 0, 1, 0.01, w.bite, v => v.toFixed(2), v => { w.bite = v; refresh(); });
+
+      const cnt = document.createElement('div'); cnt.className = 'count';
+      const capWrap = document.createElement('div');
+      const capLab = document.createElement('div'); capLab.className = 'cap'; capLab.textContent = 'max anchors';
+      const cap = document.createElement('input');
+      Object.assign(cap, { type:'number', min:3, max:400, step:1, value:w.maxN });
+      capWrap.append(capLab, cap); cnt.append(capWrap); wb.append(cnt);
+
+      const nS = slider(wb, 'anchors', 3, w.maxN, 1, w.n, v => v.toFixed(0), v => {
+        w.n = v; w.pts = resample(w.base, v); refresh();
+      });
+      cap.addEventListener('change', () => {
+        w.maxN = clamp(Math.round(+cap.value) || 60, 3, 400);
+        cap.value = w.maxN; nS.max = w.maxN;
+        if (+nS.value > w.maxN) { nS.value = w.maxN; nS.dispatchEvent(new Event('input')); }
+      });
+
+      check(wb, 'visible', w.visible, v => { w.visible = v; refresh(); });
+
+      const m = document.createElement('div'); m.className = 'mini'; wb.append(m);
+      btn(m, '↓', () => moveWiggle(l, w, -1), 'arrow').disabled = wi === 0;
+      btn(m, '↑', () => moveWiggle(l, w, 1), 'arrow').disabled = wi === l.wiggles.length - 1;
+      btn(m, 'Duplicate', () => {
+        const c = cloneWiggle(w, spread * 0.5, w.id * 29);
+        c.open = true; l.wiggles.splice(wi + 1, 0, c); activeId = c.id;
+        buildPanels(); syncAll();
+      });
+      btn(m, 'Delete', () => deleteWiggle(l, w));
+    });
+
+    if (!l.wiggles.length) {
+      const e = document.createElement('p'); e.className = 'empty';
+      e.textContent = 'No wiggles on this layer yet.';
+      body.append(e);
+    }
+
+    const add = document.createElement('div'); add.className = 'add'; body.append(add);
+    btn(add, '+ Add wiggle', () => addWiggle(l));
+
+    const mini = document.createElement('div'); mini.className = 'mini'; body.append(mini);
+    btn(mini, '↓', () => moveLayer(l, -1), 'arrow').disabled = li === 0;
+    btn(mini, '↑', () => moveLayer(l, 1), 'arrow').disabled = li === layers.length - 1;
+    btn(mini, 'Duplicate', () => duplicateLayer(l));
+    btn(mini, 'Delete', () => deleteLayer(l)).disabled = layers.length <= 1;
+  });
+
+  const addL = document.createElement('div'); addL.className = 'add'; host.append(addL);
+  btn(addL, '+ Add layer', addLayer);
+}
+
+/* --- reference image -------------------------------------------------- */
+function buildRefControls() {
+  const host = document.getElementById('refControls');
+  let extra = document.getElementById('refExtra');
+  if (extra) extra.remove();
+  extra = document.createElement('div'); extra.id = 'refExtra';
+  host.append(extra);
+  if (!refImg) return;
+
+  slider(extra, 'reference opacity', 0, 1, 0.01, refOpacity,
+    v => v.toFixed(2), v => { refOpacity = v; render(); });
+  check(extra, 'show reference', refVisible, v => { refVisible = v; render(); });
+  check(extra, 'over the painting', refOnTop, v => { refOnTop = v; render(); });
+  const m = document.createElement('div'); m.className = 'mini'; extra.append(m);
+  btn(m, 'Use its proportions', () => {
+    const k = 100 / Math.max(refImg.width, refImg.height);
+    cmW = Math.round(refImg.width * k * 10) / 10;
+    cmH = Math.round(refImg.height * k * 10) / 10;
+    ui.cmW.value = cmW; ui.cmH.value = cmH;
+    relayout();
+  });
+  btn(m, 'Remove', () => {
+    refImg = null; ui.refFile.value = '';
+    buildRefControls(); render();
+  });
+  const h = document.createElement('p'); h.className = 'hint';
+  h.textContent = 'Grounds are opaque, so a reference under them is hidden — keep it over the painting to trace, and turn it off before saving.';
+  extra.append(h);
+}
+
+/* --- export ---------------------------------------------------------- */
+function savePNG() {
+  const wasVisible = refVisible;
+  refVisible = false;
+  render(false);                         // never bake the reference in
+  const name = ((ui.title.value || 'wiggle').toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'wiggle') + '.png';
+  cv.toBlob(blob => {
+    if (blob) deliver(blob, name, ui.save, 'Save PNG', null);
+    else { ui.save.textContent = 'Long-press the canvas'; setTimeout(() => ui.save.textContent = 'Save PNG', 2600); }
+    refVisible = wasVisible;
+    render();
+  }, 'image/png');
+}
+/* Write a standalone viewer: the current state, the drawing code, and
+   nothing else. No controls, no reference image, no dependencies — a
+   single file that can sit in a repo and be served as a page. */
+/* Built from character codes so the literal text never appears in this file. */
+const OPEN_TAG  = '<' + String.fromCharCode(115, 99, 114, 105, 112, 116) + '>';
+const CLOSE_TAG = '<' + '/' + String.fromCharCode(115, 99, 114, 105, 112, 116) + '>';
+
+function exportViewer() {
+  const state = {
+    title: (ui.title.value || 'Wiggle').trim(),
+    cmW, cmH,
+    layers: layers.map(l => ({
+      hue: l.hue, blend: l.blend, visible: l.visible,
+      ground: { opacity: l.ground.opacity, visible: l.ground.visible },
+      wiggles: l.wiggles.map(w => ({
+        id: w.id, sat: w.sat, w: w.w, wBase: w.wBase, tight: w.tight,
+        drift: w.drift, speed: w.speed, visible: w.visible,
+        brush: w.brush, load: w.load, swell: w.swell, bite: w.bite,
+        pts: w.pts.map(q => ({ x: +q.x.toFixed(4), y: +q.y.toFixed(4) }))
+      }))
+    }))
+  };
+
+  // the drawing code travels with it, straight from this file
+  // arrow consts have to be re-declared by name; the rest are declarations
+  const consts = 'const clamp = ' + clamp + ';\nconst lerp = ' + lerp + ';';
+  const fns = [hash2, noise2, hsv, catmull, tracePath, shift,
+               splineStroke, brushStroke].map(f => f.toString()).join('\n\n');
+
+  const esc = t => String(t).replace(/[<&]/g, c => c === '<' ? '&lt;' : '&amp;');
+  const doc = [
+    '<!DOCTYPE html>',
+    '<html lang="en"><head><meta charset="utf-8">',
+    '<meta name="viewport" content="width=device-width, initial-scale=1">',
+    '<title>' + esc(state.title) + '</title>',
+    '<style>',
+    '  html,body{margin:0;height:100%;background:#EFEDE4;overflow:hidden}',
+    '  body{display:flex;align-items:center;justify-content:center}',
+    '  canvas{display:block;box-shadow:0 10px 40px rgba(0,0,0,.15)}',
+    '</style></head><body>' + OPEN_TAG,
+    'const BRI = 100;',
+    'const STATE = ' + JSON.stringify(state).replace(/<\//g, '<\\/') + ';',
+    'const layers = STATE.layers;',
+    'let W = 0, H = 0, R = 0, DPR = 1, t = 0, raf = null;',
+    'const cv = document.createElement("canvas"); document.body.append(cv);',
+    'const ctx = cv.getContext("2d");',
+    'const sheetC = document.createElement("canvas"), sheet = sheetC.getContext("2d");',
+    'const bufC = document.createElement("canvas"), buf = bufC.getContext("2d");',
+    consts,
+    fns,
+    'function size(){',
+    '  const scale = Math.min(innerWidth / STATE.cmW, innerHeight / STATE.cmH);',
+    '  W = Math.max(80, Math.floor(STATE.cmW * scale));',
+    '  H = Math.max(80, Math.floor(STATE.cmH * scale));',
+    '  R = Math.min(W, H);',
+    '  DPR = Math.min(2, window.devicePixelRatio || 1);',
+    '  for (const [c, x] of [[cv, ctx], [sheetC, sheet], [bufC, buf]]) {',
+    '    c.width = W * DPR; c.height = H * DPR;',
+    '    c.style.width = W + "px"; c.style.height = H + "px";',
+    '    x.setTransform(DPR, 0, 0, DPR, 0, 0);',
+    '  }',
+    '}',
+    'function render(){',
+    '  ctx.globalCompositeOperation = "source-over"; ctx.globalAlpha = 1;',
+    '  ctx.fillStyle = "#ffffff"; ctx.fillRect(0, 0, W, H);',
+    '  for (const l of layers) {',
+    '    if (!l.visible) continue;',
+    '    sheet.globalCompositeOperation = "source-over"; sheet.globalAlpha = 1;',
+    '    sheet.clearRect(0, 0, W, H);',
+    '    if (l.ground.visible) { sheet.globalAlpha = l.ground.opacity; sheet.fillStyle = hsv(l.hue, 100, BRI); sheet.fillRect(0, 0, W, H); sheet.globalAlpha = 1; }',
+    '    for (const w of l.wiggles) {',
+    '      if (!w.visible) continue;',
+    '      const pts = w.pts.map((p, i) => shift(p, i, w));',
+    '      if (w.brush) brushStroke(pts, w, l.hue); else splineStroke(pts, w, l.hue);',
+    '    }',
+    '    ctx.globalCompositeOperation = l.blend;',
+    '    ctx.drawImage(sheetC, 0, 0, W, H);',
+    '  }',
+    '  ctx.globalCompositeOperation = "source-over";',
+    '}',
+    'const moves = layers.some(l => l.visible && l.wiggles.some(w => w.drift > 0 && w.visible))',
+    '  && !matchMedia("(prefers-reduced-motion: reduce)").matches;',
+    'function tick(){ t += 0.012; render(); raf = requestAnimationFrame(tick); }',
+    'addEventListener("resize", () => { size(); render(); });',
+    'size(); render();',
+    'if (moves) raf = requestAnimationFrame(tick);',
+    CLOSE_TAG + '</body></html>'
+  ].join('\n');
+
+  const name = (state.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'wiggle') + '.html';
+  lastExport = { doc, name };
+
+  // Always surface the source: on a phone the download is usually blocked,
+  // and pasting into GitHub's web editor works everywhere.
+  ui.dump.value = doc;
+  ui.dump.style.display = 'block';
+  ui.exportHelp.style.display = 'block';
+  ui.exportName.innerHTML = IOS
+    ? 'If a download prompt appeared, <code>' + name + '</code> is now in your Files app. ' +
+      'Otherwise copy the text below and paste it into GitHub ' +
+      '(<strong>Add file → Create new file</strong>, name it <code>index.html</code>).'
+    : 'Downloaded as <code>' + name + '</code>. Open it from your files, or rename it ' +
+      '<code>index.html</code> for GitHub Pages. The text below is the same file.';
+
+  navigator.clipboard && navigator.clipboard.writeText(doc).then(
+    () => flash(ui.export, 'Copied', EXPORT_LABEL),
+    () => {
+      ui.dump.focus(); ui.dump.select();
+      flash(ui.export, 'Select the text below', EXPORT_LABEL);
+    }
+  );
+
+  // always attempt the real download too — it works on desktop, and on a
+  // phone it simply does nothing, leaving the copy box as the way through
+  deliver(new Blob([doc], { type: 'text/html' }), name, ui.export, EXPORT_LABEL, null);
+}
+
+function flash(button, msg, restore, ms = 3000) {
+  button.textContent = msg;
+  setTimeout(() => button.textContent = restore, ms);
+}
+
+/* Render the exported page in this tab so you can check it before
+   committing. Back button returns you to the editor. */
+function previewExport() {
+  if (!lastExport) return;
+  const w = window.open('', '_self');
+  (w || document).open();
+  (w || document).write(lastExport.doc);
+  (w || document).close();
+}
+
+/* iOS Safari ignores the download attribute, so a link click just opens a
+   blank tab. Try the share sheet first — that gives Save to Files — then
+   fall back to a link, then to showing the text for manual copying. */
+async function deliver(blob, name, button, restore, text) {
+  const done = msg => {
+    button.textContent = msg;
+    setTimeout(() => button.textContent = restore, 2600);
+  };
+  const file = (() => {
+    try { return new File([blob], name, { type: blob.type }); } catch { return null; }
+  })();
+
+  if (file && navigator.canShare && navigator.canShare({ files: [file] })) {
+    try { await navigator.share({ files: [file], title: name }); return done('Shared'); }
+    catch (err) { if (err && err.name === 'AbortError') return done(restore); }
+  }
+
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = name; a.rel = 'noopener';
+  a.target = '_blank';                 // never navigate the editor itself away
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);   // give slow handlers time
+
+  if (IOS) {
+    if (text != null) { ui.dump.value = text; ui.dump.style.display = 'block'; }
+    return done('Check Files, or copy below');
+  }
+  done('Saved ' + name);
+}
+
+function layersAsText() {
+  const head = `// canvas ${cmW} × ${cmH} cm\n`;
+  return head + '\n' + layers.map((l, li) => {
+    const h = `// ——— Layer ${li + 1} — hue ${l.hue}, ` +
+      `${l.blend} onto the layers below\n` +
+      `// ground: hsb(${l.hue}, 100, 100) = ` +
+      `${hexOf(l.hue, 100, BRI)} @ opacity ${l.ground.opacity}` +
+      `${l.ground.visible ? '' : ' (hidden)'}`;
+    const ws = l.wiggles.map((w, wi) =>
+      `// wiggle ${wi + 1} — hsb(${l.hue}, ${w.sat}, 100), ` +
+      `weight ${(w.wBase * w.w).toFixed(4)} × short side, tightness ${w.tight}` +
+      `${w.brush ? `, brush load ${w.load} swell ${w.swell} bite ${w.bite}` : ''}\n` +
+      `const layer${li + 1}wiggle${wi + 1} = [\n` +
+      w.pts.map(q => `  [${q.x.toFixed(3)}, ${q.y.toFixed(3)}]`).join(',\n') + '\n];'
+    ).join('\n\n');
+    return h + (ws ? '\n\n' + ws : '');
+  }).join('\n\n');
+}
+
+/* --- boot ------------------------------------------------------------ */
+function syncAll() {
+  cv.classList.toggle('editing', ui.pts.checked);
+  refresh();
+}
+function boot() {
+  cv = document.getElementById('cv');          // already in the markup
+  ctx = cv.getContext('2d');
+  sheetC = document.createElement('canvas'); sheet = sheetC.getContext('2d');
+  bufC   = document.createElement('canvas'); buf   = bufC.getContext('2d');
+
+  ['pts','copy','save','reset','dump','cmW','cmH','swap','ratio','refFile','title',
+   'export','preview','exportHelp','exportName']
+    .forEach(id => ui[id] = document.getElementById(id));
+  // boot must not die on a missing element — that would take the whole app down
+  for (const [k, v] of Object.entries(ui)) if (!v) console.warn('missing element:', k);
+
+  ui.pts.addEventListener('change', syncAll);
+  ui.reset.addEventListener('click', () => { resetAll(); buildPanels(); syncAll(); });
+  ui.save.addEventListener('click', savePNG);
+  ui.export.addEventListener('click', () => { exportViewer(); ui.preview.style.display = 'block'; });
+  ui.preview.addEventListener('click', previewExport);
+  ui.export.textContent = EXPORT_LABEL;
+  ui.copy.addEventListener('click', async () => {
+    const txt = layersAsText();
+    try {
+      await navigator.clipboard.writeText(txt);
+      ui.copy.textContent = 'Copied';
+      setTimeout(() => ui.copy.textContent = 'Copy layers as JS', 1400);
+    } catch {
+      ui.dump.value = txt;
+      ui.dump.style.display = 'block';
+      ui.dump.focus(); ui.dump.select();
+      ui.copy.textContent = 'Select the text below';
+      setTimeout(() => ui.copy.textContent = 'Copy layers as JS', 2400);
+    }
+  });
+
+  const readDims = () => {
+    cmW = clamp(+ui.cmW.value || 60, 1, 2000);
+    cmH = clamp(+ui.cmH.value || 60, 1, 2000);
+    relayout();
+  };
+  ui.cmW.addEventListener('change', readDims);
+  ui.cmH.addEventListener('change', readDims);
+  ui.swap.addEventListener('click', () => {
+    const a = cmW; cmW = cmH; cmH = a;
+    ui.cmW.value = cmW; ui.cmH.value = cmH;
+    relayout();
+  });
+  ui.refFile.addEventListener('change', e => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    const fr = new FileReader();
+    fr.onload = () => {
+      const im = new Image();
+      im.onload = () => { refImg = im; refVisible = true; buildRefControls(); render(); };
+      im.src = fr.result;
+    };
+    fr.readAsDataURL(f);
+  });
+
+  cv.addEventListener('pointerdown', onDown);
+  cv.addEventListener('pointermove', onMove);
+  cv.addEventListener('pointerup', onUp);
+  cv.addEventListener('pointercancel', onUp);
+  window.addEventListener('resize', onResize);
+  window.addEventListener('orientationchange', onResize);
+
+  resetAll();
+  buildPanels();
+  buildRefControls();
+  relayout();
+  // the first measurement can happen before layout settles; take another
+  requestAnimationFrame(() => { fitBox(); makeCanvases(); render(); });
+  window.addEventListener('load', () => { fitBox(); makeCanvases(); render(); });
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    allWiggles().forEach(w => w.drift = 0);
+  }
+  syncAll();
+}
+function reportStatus() {
+  const box = document.getElementById('status');
+  if (!box) return;
+  const c = document.querySelector('#stage canvas');
+  const r = c && c.getBoundingClientRect();
+  box.textContent =
+    'canvas ' + (c ? 'yes' : 'NO') +
+    ' · css ' + (c ? c.style.width + '×' + c.style.height : '-') +
+    ' · onscreen ' + (r ? Math.round(r.width) + '×' + Math.round(r.height) : '-') +
+    ' · buffer ' + (c ? c.width + '×' + c.height : '-') +
+    ' · stage w ' + Math.round(document.getElementById('stage').getBoundingClientRect().width) +
+    ' · win ' + window.innerWidth + '×' + window.innerHeight +
+    ' · layers ' + layers.length +
+    ' · panels ' + document.querySelectorAll('#panels details').length;
+}
+
+function safeBoot() {
+  try { boot(); window.__wiggleBooted = true; setTimeout(reportStatus, 100); }
+  catch (err) {
+    window.__wiggleFault('Startup error: ' + (err && (err.message || err)));
+    throw err;
+  }
+}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', safeBoot);
+else safeBoot();
+</script>
+</body>
+</html>
