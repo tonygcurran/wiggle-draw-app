@@ -41,6 +41,9 @@
   .on>summary .tag{display:inline}
   .off>summary{opacity:.4}
   .bd{padding:2px 0 10px}
+  .pal{display:flex;gap:6px;margin:0 0 12px}
+  .pal button{flex:1;height:26px;padding:0;margin:0;border:1px solid var(--hair)}
+  .pal button.sel{outline:2px solid var(--ink);outline-offset:1px}
   .mini{display:flex;gap:6px;margin-top:8px}
   .mini button{margin:0;padding:7px 5px;font-size:11px}
   button{font:inherit;width:100%;padding:9px;margin-bottom:7px;cursor:pointer;
@@ -51,6 +54,17 @@
     background:transparent;border:1px solid var(--hair);color:var(--ink);padding:6px}
   #fault{display:none;position:fixed;left:0;right:0;top:0;z-index:99;padding:12px 14px;
     background:#F5E2DE;border-bottom:1px solid var(--hair);font-size:12px}
+  /* fullscreen preview: the controls step aside, the work sits on black */
+  body.full{background:#000}
+  body.full aside{display:none}
+  body.full #wrap{display:block;height:100vh;overflow:hidden}
+  body.full #stage{position:fixed;left:0;right:0;top:0;bottom:0;padding:0;
+    background:#000;box-shadow:none;z-index:50;
+    display:flex;align-items:center;justify-content:center}
+  body.full canvas{box-shadow:none}
+  #fsTip{display:none;position:fixed;left:0;right:0;bottom:16px;z-index:60;
+    text-align:center;color:rgba(255,255,255,.45);font-size:11px;pointer-events:none}
+  body.full #fsTip{display:block}
   @media (max-width:820px){
     /* the canvas sits still at the top; only the panel moves */
     #wrap{display:block;height:auto;overflow:visible}
@@ -69,11 +83,13 @@
 </head>
 <body>
 <div id="fault"></div>
+<div id="fsTip">click to exit</div>
 <div id="wrap">
   <div id="stage"><canvas id="cv" width="520" height="520"></canvas></div>
   <aside>
     <h1>Wiggle layers</h1>
     <label class="chk"><input type="checkbox" id="pts"> anchors (active wiggle)</label>
+    <label class="chk"><input type="checkbox" id="fs"> click canvas for fullscreen</label>
     <div id="panels"></div>
     <button id="addLayer">+ Add layer</button>
     <div style="height:10px"></div>
@@ -115,6 +131,11 @@ var MODES = [
   ['hue','hue'],['saturation','saturation'],['color','color'],['luminosity','luminosity']
 ];
 var DEFAULT_PTS = [[0.26,0.62],[0.50,0.40],[0.74,0.60]];
+/* At saturation and brightness 100 each of these hues lands exactly on an
+   RGB corner: red 255,0,0 · yellow 255,255,0 · green 0,255,0 ·
+   cyan 0,255,255 · blue 0,0,255 · magenta 255,0,255 */
+var PALETTE = [['red',0],['yellow',60],['green',120],
+               ['cyan',180],['blue',240],['magenta',300]];
 
 /* the traced anchors from the original painting, kept for reference */
 var TRACE = {
@@ -133,6 +154,7 @@ var spread = 0.35, hueStep = 24, newBlend = 'multiply';
 var refImg = null, refOpacity = 0.5, refOnTop = true, refShow = true;
 var lastDoc = null, lastName = 'wiggle.html';
 var COARSE = false, HIT = 14, DOT = 8;
+var isFull = false, downAt = null, moved = false;
 var el = {};
 
 /* ---------- maths ---------- */
@@ -162,7 +184,10 @@ function hex(h,s,v){
 function fit(){
   var box = el.stage.getBoundingClientRect();
   var aw, ah;
-  if (window.innerWidth <= 820) {
+  if (isFull) {
+    aw = window.innerWidth || 600;
+    ah = window.innerHeight || 600;
+  } else if (window.innerWidth <= 820) {
     aw = box.width || window.innerWidth;
     ah = Math.max(200, (window.innerHeight || 700) * 0.46);   // pinned: leave room below
   } else {
@@ -203,13 +228,14 @@ function newWiggle(seed){
   var base = jitter(DEFAULT_PTS.map(function(p){return {x:p[0],y:p[1]};}), spread, seed);
   return { id:++uid, base:base, pts:base.map(function(p){return {x:p.x,y:p.y};}),
     n:base.length, maxN:60, sat:0, w:1, wBase:0.09, tight:0,
-    tx:0, ty:0, rot:0, scale:1,
+    tx:0, ty:0, rot:0, scale:1, satDrift:0,
     drift:0, speed:1, brush:false, load:0.35, swell:0.25, bite:0.30,
     show:true, open:true };
 }
 function newLayer(hue, blend){
-  return { id:++uid, hue:hue, blend:blend||'source-over', show:true, open:true,
-    ground:{opacity:1, show:true, open:false}, wiggles:[] };
+  var id = ++uid;
+  return { id:id, hue:hue, blend:blend||'source-over', show:true, open:true,
+    ground:{opacity:1, opDrift:0, seed:id*13, show:true, open:false}, wiggles:[] };
 }
 function resetAll(){ uid=0; layers=[newLayer(60,'source-over')]; activeId=null; }
 function cloneWiggle(w, amt, seed){
@@ -303,6 +329,20 @@ function viewPts(w){
   return w.pts.map(function(p,i){ return place(shift(p,i,w),w,c); });
 }
 
+/* Colour that breathes. Saturation and ground opacity wander on the same
+   clock as the anchors, so a layer can pulse between washed-out and full
+   without the drawing itself moving. */
+function effSat(w){
+  if (!w.satDrift) return w.sat;
+  var n = noise2(w.id*53+7, t*(w.speed||1));
+  return clamp(w.sat + (n-0.5)*200*w.satDrift, 0, 100);
+}
+function effOp(g){
+  if (!g.opDrift) return g.opacity;
+  var n = noise2((g.seed||11)+31, t*(g.opSpeed||1));
+  return clamp(g.opacity + (n-0.5)*2*g.opDrift, 0, 1);
+}
+
 function shift(pt,i,w){
   if (!w.drift) return pt;
   var s=w.id*37, u=t*(w.speed||1);
@@ -325,7 +365,7 @@ function render(){
     sheet.globalAlpha=1;
     sheet.clearRect(0,0,W,H);
     if (l.ground.show){
-      sheet.globalAlpha=l.ground.opacity;
+      sheet.globalAlpha=effOp(l.ground);
       sheet.fillStyle=hsv(l.hue,100,BRI);
       sheet.fillRect(0,0,W,H);
       sheet.globalAlpha=1;
@@ -352,7 +392,7 @@ function drawRef(){
   ctx.globalAlpha=1;
 }
 function lineStroke(pts,w,hue){
-  sheet.strokeStyle=hsv(hue,w.sat,BRI);
+  sheet.strokeStyle=hsv(hue,effSat(w),BRI);
   sheet.lineWidth=w.wBase*R*w.w*w.scale;
   sheet.lineCap='round'; sheet.lineJoin='round';
   tracePath(sheet,pts,w.tight);
@@ -381,7 +421,7 @@ function brushStroke(pts,w,hue){
   buf.globalCompositeOperation='source-over';
   buf.globalAlpha=1;
   buf.clearRect(0,0,W,H);
-  buf.fillStyle=hsv(hue,w.sat,BRI);
+  buf.fillStyle=hsv(hue,effSat(w),BRI);
   for (i=0;i<n;i++){
     var g=i/(n-1);
     var load=1+w.load*(0.5-g)*1.6;
@@ -417,7 +457,11 @@ function drawAnchors(){
 }
 function moving(){
   return layers.some(function(l){
-    return l.show && l.wiggles.some(function(w){ return w.show && w.drift>0; });
+    if (!l.show) return false;
+    if (l.ground.show && l.ground.opDrift>0) return true;
+    return l.wiggles.some(function(w){
+      return w.show && (w.drift>0 || w.satDrift>0);
+    });
   });
 }
 function tick(){ t+=0.012; render(); raf=requestAnimationFrame(tick); }
@@ -433,7 +477,28 @@ function pos(e){
   var r=cv.getBoundingClientRect();
   return { x:(e.clientX-r.left)*(W/r.width), y:(e.clientY-r.top)*(H/r.height) };
 }
+/* Fullscreen preview inside the editor: the panel steps aside and the
+   work sits centred on black. Only offered when the switch is ticked, and
+   only on a click that isn't a drag, so anchor editing still works. */
+function setFull(v){
+  isFull = v;
+  document.body.className = v ? 'full' : '';
+  try {
+    var d = document.documentElement;
+    if (v) {
+      if (d.requestFullscreen) d.requestFullscreen();
+      else if (d.webkitRequestFullscreen) d.webkitRequestFullscreen();
+    } else if (document.fullscreenElement || document.webkitFullscreenElement) {
+      if (document.exitFullscreen) document.exitFullscreen();
+      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+    }
+  } catch (err) {}
+  fit(); render();
+}
+
 function onDown(e){
+  downAt = { x:e.clientX, y:e.clientY };
+  moved = false;
   if (!el.pts.checked) return;
   var a=activeW(); if(!a) return;
   var p=pos(e), v=viewPts(a.w), best=null, bd=HIT*HIT;
@@ -448,6 +513,9 @@ function onDown(e){
   render();
 }
 function onMove(e){
+  if (downAt && !moved) {
+    if (Math.abs(e.clientX-downAt.x) > 6 || Math.abs(e.clientY-downAt.y) > 6) moved = true;
+  }
   if (!drag) return;
   var p=pos(e), w=drag.w;
   /* the pointer is in view space; put it back through the transform so
@@ -459,9 +527,15 @@ function onMove(e){
   render();
 }
 function onUp(){
-  if (!drag) return;
-  drag.w.base = drag.w.pts.map(function(p){return {x:p.x,y:p.y};});
-  drag=null; render();
+  var wasDrag = !!drag;
+  if (drag) {
+    drag.w.base = drag.w.pts.map(function(p){return {x:p.x,y:p.y};});
+    drag = null;
+    render();
+  }
+  /* a clean click — no anchor grabbed, no movement — toggles the preview */
+  if (!wasDrag && !moved && el.fs && el.fs.checked) setFull(!isFull);
+  downAt = null; moved = false;
 }
 
 /* ---------- control builders ---------- */
@@ -510,6 +584,27 @@ function num(host,label,val,min,max,fn){
   inp.addEventListener('change', function(){ fn(clamp(Math.round(+inp.value)||val,min,max), inp); });
   row.appendChild(lab); row.appendChild(inp); host.appendChild(row);
   return inp;
+}
+function palette(host, get, set){
+  var row=document.createElement('div'); row.className='pal';
+  var made=[];
+  PALETTE.forEach(function(c){
+    var b=document.createElement('button');
+    b.type='button';
+    b.title=c[0];
+    b.setAttribute('aria-label',c[0]);
+    b.style.background=hex(c[1],100,BRI);
+    b.addEventListener('click', function(){ set(c[1]); mark(); });
+    row.appendChild(b);
+    made.push([b,c[1]]);
+  });
+  function mark(){
+    var h=get();
+    made.forEach(function(m){ m[0].className = (m[1]===h) ? 'sel' : ''; });
+  }
+  mark();
+  host.appendChild(row);
+  return mark;
 }
 function btn(host,label,fn,dis){
   var b=document.createElement('button');
@@ -601,8 +696,14 @@ function build(){
       onToggle:function(o){ l.open=o; },
       isOff:function(){ return !l.show; }
     });
-    slider(lb,'hue (whole layer)',0,360,1,l.hue,function(v){return v.toFixed(0);},
-      function(v){ l.hue=v; refresh(); });
+    var hueSlider;
+    var markPal = palette(lb, function(){ return l.hue; }, function(v){
+      l.hue=v;
+      if (hueSlider){ hueSlider.value=v; hueSlider.dispatchEvent(new Event('input')); }
+      else refresh();
+    });
+    hueSlider = slider(lb,'hue (whole layer)',0,360,1,l.hue,function(v){return v.toFixed(0);},
+      function(v){ l.hue=v; markPal(); refresh(); });
     picker(lb,'blend onto layers below',MODES,l.blend,function(v){ l.blend=v; refresh(); });
     check(lb,'layer visible',l.show,function(v){ l.show=v; refresh(); });
 
@@ -613,6 +714,10 @@ function build(){
     });
     slider(gb,'opacity',0,1,0.01,g.opacity,function(v){return v.toFixed(2);},
       function(v){ g.opacity=v; refresh(); });
+    slider(gb,'opacity drift',0,1,0.01,g.opDrift,function(v){return v.toFixed(2);},
+      function(v){ g.opDrift=v; refresh(); });
+    slider(gb,'drift speed',0.05,4,0.05,g.opSpeed||1,function(v){return v.toFixed(2)+'x';},
+      function(v){ g.opSpeed=v; refresh(); });
     check(gb,'visible',g.show,function(v){ g.show=v; refresh(); });
     var gh=document.createElement('p'); gh.className='hint';
     gh.textContent='Full saturation always. At 1 the ground covers everything below it.';
@@ -628,6 +733,8 @@ function build(){
       });
       slider(wb,'saturation',0,100,1,w.sat,function(v){return v.toFixed(0);},
         function(v){ w.sat=v; refresh(); });
+      slider(wb,'saturation drift',0,1,0.01,w.satDrift,function(v){return v.toFixed(2);},
+        function(v){ w.satDrift=v; refresh(); });
       slider(wb,'stroke weight',0.02,5,0.01,w.w,function(v){return v.toFixed(2)+'x';},
         function(v){ w.w=v; refresh(); });
       slider(wb,'curve tightness',-2,1,0.01,w.tight,function(v){return v.toFixed(2);},
@@ -722,10 +829,11 @@ function buildViewer(){
   var state={ title:title, cmW:cmW, cmH:cmH,
     layers:layers.map(function(l){
       return { hue:l.hue, blend:l.blend, show:l.show,
-        ground:{opacity:l.ground.opacity, show:l.ground.show},
+        ground:{opacity:l.ground.opacity, opDrift:l.ground.opDrift,
+                opSpeed:l.ground.opSpeed||1, seed:l.ground.seed||13, show:l.ground.show},
         wiggles:l.wiggles.map(function(w){
           return { id:w.id, sat:w.sat, w:w.w, wBase:w.wBase, tight:w.tight,
-            tx:w.tx, ty:w.ty, rot:w.rot, scale:w.scale,
+            tx:w.tx, ty:w.ty, rot:w.rot, scale:w.scale, satDrift:w.satDrift,
             drift:w.drift, speed:w.speed, show:w.show,
             brush:w.brush, load:w.load, swell:w.swell, bite:w.bite,
             pts:w.pts.map(function(p){ return {x:+p.x.toFixed(4), y:+p.y.toFixed(4)}; }) };
@@ -733,7 +841,7 @@ function buildViewer(){
     }) };
 
   var fns=[clamp,lerp,hash2,noise2,hsv,catmull,tracePath,shift,
-    centre,place,viewPts,lineStroke,brushStroke]
+    centre,place,viewPts,effSat,effOp,lineStroke,brushStroke]
     .map(function(f){ return f.toString(); }).join('\n');
 
   var esc=function(s){ return String(s).replace(/[<&]/g,function(c){ return c==='<'?'&lt;':'&amp;'; }); };
@@ -741,11 +849,14 @@ function buildViewer(){
 
   return [
     '<!DOCTYPE html>','<html lang="en"><head><meta charset="utf-8">',
-    '<meta name="viewport" content="width=device-width, initial-scale=1">',
+    '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">',
     '<title>'+esc(title)+'</title>','<style>',
     'html,body{margin:0;height:100%;background:#EFEDE4;overflow:hidden}',
-    'body{display:flex;align-items:center;justify-content:center}',
-    'canvas{display:block;box-shadow:0 10px 40px rgba(0,0,0,.15)}',
+    'body{display:flex;align-items:center;justify-content:center;',
+    '  transition:background .25s ease}',
+    'body.full{background:#000}',
+    'canvas{display:block;cursor:pointer;box-shadow:0 10px 40px rgba(0,0,0,.15)}',
+    'body.full canvas{box-shadow:none}',
     '</style></head><body>'+OPEN,
     'var BRI=100;',
     'var STATE='+json+';',
@@ -756,8 +867,11 @@ function buildViewer(){
     'var sheetC=document.createElement("canvas"), sheet=sheetC.getContext("2d");',
     'var bufC=document.createElement("canvas"), buf=bufC.getContext("2d");',
     fns,
+    'var full=false;',
     'function fit(){',
-    '  var k=Math.min(innerWidth/STATE.cmW, innerHeight/STATE.cmH);',
+    '  /* fullscreen fills the screen edge to edge; windowed leaves a margin */',
+    '  var k = Math.min(innerWidth/STATE.cmW, innerHeight/STATE.cmH);',
+    '  if (!full) k *= 0.92;            /* windowed leaves a little air */',
     '  W=Math.max(80,Math.round(STATE.cmW*k)); H=Math.max(80,Math.round(STATE.cmH*k));',
     '  R=Math.min(W,H); DPR=Math.min(2, window.devicePixelRatio||1);',
     '  [[cv,ctx],[sheetC,sheet],[bufC,buf]].forEach(function(p){',
@@ -765,13 +879,49 @@ function buildViewer(){
     '    p[0].style.width=W+"px"; p[0].style.height=H+"px";',
     '    p[1].setTransform(DPR,0,0,DPR,0,0); });',
     '}',
+    '/* Click anywhere to fill the screen, click again to come back. Real',
+    '   fullscreen is requested where the browser allows it; iOS Safari has',
+    '   no such API, so the black page filling the window is the fallback. */',
+    'function isFull(){',
+    '  return !!(document.fullscreenElement || document.webkitFullscreenElement);',
+    '}',
+    'function apply(){',
+    '  document.body.className = full ? "full" : "";',
+    '  fit(); render();',
+    '}',
+    'function toggle(){',
+    '  full = !full;',
+    '  try {',
+    '    if (full) {',
+    '      var e = document.documentElement;',
+    '      if (e.requestFullscreen) e.requestFullscreen();',
+    '      else if (e.webkitRequestFullscreen) e.webkitRequestFullscreen();',
+    '    } else {',
+    '      if (document.exitFullscreen && isFull()) document.exitFullscreen();',
+    '      else if (document.webkitExitFullscreen && isFull()) document.webkitExitFullscreen();',
+    '    }',
+    '  } catch (err) {}',
+    '  apply();',
+    '}',
+    'addEventListener("click", toggle);',
+    'addEventListener("keydown", function(e){',
+    '  if (e.key === "Escape" && full) { full=false; apply(); }',
+    '  if (e.key === "f" || e.key === "Enter") toggle();',
+    '});',
+    '/* leaving fullscreen by Escape or a system gesture must match up */',
+    'document.addEventListener("fullscreenchange", function(){',
+    '  if (!isFull() && full) { full=false; apply(); }',
+    '});',
+    'document.addEventListener("webkitfullscreenchange", function(){',
+    '  if (!isFull() && full) { full=false; apply(); }',
+    '});',
     'function render(){',
     '  ctx.globalCompositeOperation="source-over"; ctx.globalAlpha=1;',
     '  ctx.fillStyle="#ffffff"; ctx.fillRect(0,0,W,H);',
     '  for (var i=0;i<layers.length;i++){ var l=layers[i]; if(!l.show) continue;',
     '    sheet.globalCompositeOperation="source-over"; sheet.globalAlpha=1;',
     '    sheet.clearRect(0,0,W,H);',
-    '    if (l.ground.show){ sheet.globalAlpha=l.ground.opacity;',
+    '    if (l.ground.show){ sheet.globalAlpha=effOp(l.ground);',
     '      sheet.fillStyle=hsv(l.hue,100,BRI); sheet.fillRect(0,0,W,H); sheet.globalAlpha=1; }',
     '    for (var j=0;j<l.wiggles.length;j++){ var w=l.wiggles[j]; if(!w.show) continue;',
     '      var pts=viewPts(w);',
@@ -779,11 +929,13 @@ function buildViewer(){
     '    ctx.globalCompositeOperation=l.blend; ctx.drawImage(sheetC,0,0,W,H); }',
     '  ctx.globalCompositeOperation="source-over";',
     '}',
-    'var moves=layers.some(function(l){ return l.show && l.wiggles.some(function(w){',
-    '  return w.show && w.drift>0; }); }) &&',
+    'var moves=layers.some(function(l){ if(!l.show) return false;',
+    '  if (l.ground.show && l.ground.opDrift>0) return true;',
+    '  return l.wiggles.some(function(w){ return w.show && (w.drift>0||w.satDrift>0); }); }) &&',
     '  !(window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches);',
     'function tick(){ t+=0.012; render(); raf=requestAnimationFrame(tick); }',
     'addEventListener("resize", function(){ fit(); render(); });',
+    'document.body.className="";',
     'fit(); render();',
     'if (moves) raf=requestAnimationFrame(tick);',
     CLOSE+'</body></html>'
@@ -864,6 +1016,16 @@ function boot(){
     cv.className = el.pts.checked ? 'editing' : '';
     render();
   });
+  el.fs = document.getElementById('fs');
+  el.fs.addEventListener('change', function(){
+    if (!el.fs.checked && isFull) setFull(false);
+  });
+  ['fullscreenchange','webkitfullscreenchange'].forEach(function(n){
+    document.addEventListener(n, function(){
+      var on = !!(document.fullscreenElement || document.webkitFullscreenElement);
+      if (!on && isFull) setFull(false);
+    });
+  });
   document.getElementById('addLayer').addEventListener('click', function(){
     layers.push(newLayer((layers[0].hue+hueStep*layers.length)%360, newBlend));
     build(); refresh();
@@ -883,6 +1045,8 @@ function boot(){
   document.addEventListener('keydown', function(e){
     if (e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA') return;
     if (e.key==='a'){ el.pts.checked=!el.pts.checked; cv.className=el.pts.checked?'editing':''; render(); }
+    if (e.key==='Escape' && isFull) setFull(false);
+    if (e.key==='f' && el.fs && el.fs.checked) setFull(!isFull);
     if (e.key==='s') savePNG();
     if (e.key==='r'){ resetAll(); build(); refresh(); }
   });
