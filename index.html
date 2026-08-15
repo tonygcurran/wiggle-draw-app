@@ -41,6 +41,11 @@
   .on>summary .tag{display:inline}
   .off>summary{opacity:.4}
   .bd{padding:2px 0 10px}
+  .tog{margin-left:auto;display:flex;gap:4px;flex:none}
+  .tog span{width:22px;height:20px;line-height:19px;text-align:center;font-size:10px;
+    border:1px solid var(--hair);cursor:pointer;user-select:none;-webkit-user-select:none}
+  .tog span.on{background:var(--ink);color:var(--panel);border-color:var(--ink)}
+  summary::after{margin-left:6px}
   .pal{display:flex;gap:6px;margin:0 0 12px}
   .pal button{flex:1;height:26px;padding:0;margin:0;border:1px solid var(--hair)}
   .pal button.sel{outline:2px solid var(--ink);outline-offset:1px}
@@ -92,9 +97,21 @@
     <label class="chk"><input type="checkbox" id="fs"> click canvas for fullscreen</label>
     <div id="panels"></div>
     <button id="addLayer">+ Add layer</button>
+    <button id="clearSolo" style="display:none">Clear all solos</button>
+    <div style="height:10px"></div>
+    <button id="saveProject">Save project</button>
+    <label for="loadProject" id="loadProject-l"
+      style="display:block;margin-bottom:7px;padding:9px;text-align:center;cursor:pointer;
+             border:1px solid var(--hair)">Load project</label>
+    <input type="file" id="loadProject" accept=".json,application/json" style="display:none">
     <div style="height:10px"></div>
     <button id="export">Export standalone HTML</button>
     <button id="save">Save PNG</button>
+    <label style="display:block;margin-bottom:7px">
+      <span style="opacity:.55">PSD long side, px</span>
+      <input type="number" id="psdPx" min="200" max="8000" step="100" value="2000">
+    </label>
+    <button id="psd">Save layered PSD</button>
     <button id="reset">Reset</button>
     <p class="hint" id="note"></p>
     <textarea id="dump" readonly></textarea>
@@ -227,15 +244,17 @@ function jitter(pts, amt, seed){
 function newWiggle(seed){
   var base = jitter(DEFAULT_PTS.map(function(p){return {x:p[0],y:p[1]};}), spread, seed);
   return { id:++uid, base:base, pts:base.map(function(p){return {x:p.x,y:p.y};}),
-    n:base.length, maxN:60, sat:0, w:1, wBase:0.09, tight:0,
-    tx:0, ty:0, rot:0, scale:1, satDrift:0,
+    n:base.length, maxN:60, sat:50, w:1, wBase:0.09, tight:0,
+    tx:0, ty:0, rot:0, scale:1,
+    satDrift:0, satSpeed:1, wDrift:0, wSpeed:1,
     drift:0, speed:1, brush:false, load:0.35, swell:0.25, bite:0.30,
     show:true, open:true };
 }
 function newLayer(hue, blend){
   var id = ++uid;
-  return { id:id, hue:hue, blend:blend||'source-over', show:true, open:true,
-    ground:{opacity:1, opDrift:0, seed:id*13, show:true, open:false}, wiggles:[] };
+  return { id:id, hue:hue, blend:blend||'source-over', mute:false, solo:false, open:true,
+    ground:{opacity:0.5, opDrift:0, opSpeed:1, seed:id*13, show:true, open:false},
+    wiggles:[] };
 }
 function resetAll(){ uid=0; layers=[newLayer(60,'source-over')]; activeId=null; }
 function cloneWiggle(w, amt, seed){
@@ -244,6 +263,18 @@ function cloneWiggle(w, amt, seed){
   c.id=++uid; c.base=base; c.pts=base.map(function(p){return {x:p.x,y:p.y};}); c.open=false;
   return c;
 }
+/* Solo wins over everything: the moment any layer is soloed, only the
+   soloed ones draw. Mute silences a layer whether or not it is soloed,
+   the same way a mixer behaves. */
+function anySolo(){
+  for (var i=0;i<layers.length;i++) if (layers[i].solo) return true;
+  return false;
+}
+function vis(l){
+  if (l.mute) return false;
+  return anySolo() ? !!l.solo : true;
+}
+
 function allW(){ return layers.reduce(function(a,l){return a.concat(l.wiggles);},[]); }
 function fixActive(){
   var all=allW();
@@ -334,8 +365,14 @@ function viewPts(w){
    without the drawing itself moving. */
 function effSat(w){
   if (!w.satDrift) return w.sat;
-  var n = noise2(w.id*53+7, t*(w.speed||1));
+  var n = noise2(w.id*53+7, t*(w.satSpeed||1));
   return clamp(w.sat + (n-0.5)*200*w.satDrift, 0, 100);
+}
+/* weight drifts as a multiplier, so a thin mark stays thin in proportion */
+function effW(w){
+  if (!w.wDrift) return w.w;
+  var n = noise2(w.id*97+19, t*(w.wSpeed||1));
+  return Math.max(0.01, w.w * (1 + (n-0.5)*2*w.wDrift));
 }
 function effOp(g){
   if (!g.opDrift) return g.opacity;
@@ -360,7 +397,7 @@ function render(){
 
   for (var i=0;i<layers.length;i++){
     var l=layers[i];
-    if (!l.show) continue;
+    if (!vis(l)) continue;
     sheet.globalCompositeOperation='source-over';
     sheet.globalAlpha=1;
     sheet.clearRect(0,0,W,H);
@@ -393,7 +430,7 @@ function drawRef(){
 }
 function lineStroke(pts,w,hue){
   sheet.strokeStyle=hsv(hue,effSat(w),BRI);
-  sheet.lineWidth=w.wBase*R*w.w*w.scale;
+  sheet.lineWidth=w.wBase*R*effW(w)*w.scale;
   sheet.lineCap='round'; sheet.lineJoin='round';
   tracePath(sheet,pts,w.tight);
   sheet.stroke();
@@ -403,7 +440,7 @@ function lineStroke(pts,w,hue){
    the curve turns hardest — the way a brush does through a corner. */
 function brushStroke(pts,w,hue){
   var pad=[pts[0]].concat(pts,[pts[pts.length-1]]);
-  var base=w.wBase*R*w.w*w.scale, segs=pad.length-3, steps=40, i, k;
+  var base=w.wBase*R*effW(w)*w.scale, segs=pad.length-3, steps=40, i, k;
   var s=[];
   for (i=0;i<segs;i++)
     for (k=(i===0?0:1);k<=steps;k++)
@@ -457,15 +494,16 @@ function drawAnchors(){
 }
 function moving(){
   return layers.some(function(l){
-    if (!l.show) return false;
+    if (!vis(l)) return false;
     if (l.ground.show && l.ground.opDrift>0) return true;
     return l.wiggles.some(function(w){
-      return w.show && (w.drift>0 || w.satDrift>0);
+      return w.show && (w.drift>0 || w.satDrift>0 || w.wDrift>0);
     });
   });
 }
 function tick(){ t+=0.012; render(); raf=requestAnimationFrame(tick); }
 function refresh(){
+  if (el.clearSolo) el.clearSolo.style.display = anySolo() ? 'block' : 'none';
   var ds=document.querySelectorAll('#panels details');
   for (var i=0;i<ds.length;i++) if (ds[i]._paint) ds[i]._paint();
   if (moving()){ if(!raf) raf=requestAnimationFrame(tick); }
@@ -626,6 +664,23 @@ function section(host,title,colFn,open,o){
     var tg=document.createElement('span'); tg.className='tag'; tg.textContent='editing';
     s.appendChild(tg);
   }
+  var toggles=[];
+  if (o.toggles && o.toggles.length){
+    var bar=document.createElement('span'); bar.className='tog';
+    o.toggles.forEach(function(tt){
+      var el2=document.createElement('span');
+      el2.textContent=tt.label;
+      el2.title=tt.title||tt.label;
+      /* the summary would otherwise open the panel underneath the tap */
+      el2.addEventListener('click', function(ev){
+        ev.preventDefault(); ev.stopPropagation();
+        tt.onClick();
+      });
+      bar.appendChild(el2);
+      toggles.push([el2, tt]);
+    });
+    s.appendChild(bar);
+  }
   d.addEventListener('toggle', function(){ if (o.onToggle) o.onToggle(d.open); });
   if (o.onPick) s.addEventListener('click', function(){ o.onPick(); refresh(); });
   var body=document.createElement('div'); body.className='bd';
@@ -634,6 +689,7 @@ function section(host,title,colFn,open,o){
     sw.style.background=colFn();
     if (o.isOn) d.className = o.isOn() ? 'on' : '';
     if (o.isOff && o.isOff()) d.className += ' off';
+    toggles.forEach(function(t){ t[0].className = t[1].active() ? 'on' : ''; });
   };
   return body;
 }
@@ -694,7 +750,15 @@ function build(){
   layers.forEach(function(l,li){
     var lb=section(host,'Layer '+(li+1),function(){return hex(l.hue,100,BRI);},l.open,{
       onToggle:function(o){ l.open=o; },
-      isOff:function(){ return !l.show; }
+      isOff:function(){ return !vis(l); },
+      toggles:[
+        { label:'M', title:'mute this layer',
+          active:function(){ return l.mute; },
+          onClick:function(){ l.mute=!l.mute; refresh(); } },
+        { label:'S', title:'solo — only soloed layers draw',
+          active:function(){ return l.solo; },
+          onClick:function(){ l.solo=!l.solo; refresh(); } }
+      ]
     });
     var hueSlider;
     var markPal = palette(lb, function(){ return l.hue; }, function(v){
@@ -705,7 +769,8 @@ function build(){
     hueSlider = slider(lb,'hue (whole layer)',0,360,1,l.hue,function(v){return v.toFixed(0);},
       function(v){ l.hue=v; markPal(); refresh(); });
     picker(lb,'blend onto layers below',MODES,l.blend,function(v){ l.blend=v; refresh(); });
-    check(lb,'layer visible',l.show,function(v){ l.show=v; refresh(); });
+    check(lb,'mute',l.mute,function(v){ l.mute=v; refresh(); });
+    check(lb,'solo',l.solo,function(v){ l.solo=v; refresh(); });
 
     var g=l.ground;
     var gb=section(lb,'Ground',function(){return hex(l.hue,100,BRI);},g.open,{
@@ -735,8 +800,14 @@ function build(){
         function(v){ w.sat=v; refresh(); });
       slider(wb,'saturation drift',0,1,0.01,w.satDrift,function(v){return v.toFixed(2);},
         function(v){ w.satDrift=v; refresh(); });
+      slider(wb,'saturation drift speed',0.05,4,0.05,w.satSpeed||1,
+        function(v){return v.toFixed(2)+'x';}, function(v){ w.satSpeed=v; refresh(); });
       slider(wb,'stroke weight',0.02,5,0.01,w.w,function(v){return v.toFixed(2)+'x';},
         function(v){ w.w=v; refresh(); });
+      slider(wb,'weight drift',0,1,0.01,w.wDrift||0,function(v){return v.toFixed(2);},
+        function(v){ w.wDrift=v; refresh(); });
+      slider(wb,'weight drift speed',0.05,4,0.05,w.wSpeed||1,
+        function(v){return v.toFixed(2)+'x';}, function(v){ w.wSpeed=v; refresh(); });
       slider(wb,'curve tightness',-2,1,0.01,w.tight,function(v){return v.toFixed(2);},
         function(v){ w.tight=v; refresh(); });
       slider(wb,'move across',-0.6,0.6,0.005,w.tx,function(v){return v.toFixed(3);},
@@ -797,6 +868,7 @@ function build(){
     btn(lm,'Copy',function(){
       var c=newLayer((l.hue+hueStep)%360,l.blend);
       c.ground.opacity=l.ground.opacity; c.ground.show=l.ground.show;
+      c.ground.opDrift=l.ground.opDrift; c.ground.opSpeed=l.ground.opSpeed;
       c.wiggles=l.wiggles.map(function(w){ return cloneWiggle(w,0,0); });
       layers.splice(li+1,0,c);
       if (c.wiggles.length) activeId=c.wiggles[0].id;
@@ -819,6 +891,172 @@ function moveW(l,w,d){
   l.wiggles.splice(i,1); l.wiggles.splice(j,0,w); build(); refresh();
 }
 
+/* ------------------------------------------------------------------
+   PSD export — one Photoshop layer per wiggle-layer, blend modes kept.
+
+   The format: a 26-byte header, two empty sections, then the layer
+   block (per-layer rectangle, channel table, blend key, name), then
+   every channel's pixels, then a flattened composite that Photoshop
+   uses as its preview. Channels are planar and separate: A, R, G, B.
+   Everything is big-endian. Rows are PackBits-compressed, which is
+   what keeps a six-layer file in the tens of megabytes rather than
+   hundreds.
+   ------------------------------------------------------------------ */
+
+/* canvas composite operation -> Photoshop's four-character blend key */
+var PSD_BLEND = {
+  'source-over':'norm', 'multiply':'mul ', 'screen':'scrn', 'overlay':'over',
+  'darken':'dark', 'lighten':'lite', 'color-burn':'idiv', 'color-dodge':'div ',
+  'hard-light':'hLit', 'soft-light':'sLit', 'difference':'diff', 'exclusion':'smud',
+  'hue':'hue ', 'saturation':'sat ', 'color':'colr', 'luminosity':'lum '
+};
+
+function Bytes(){ this.b = new Uint8Array(1 << 18); this.n = 0; }
+Bytes.prototype.need = function(k){
+  if (this.n + k <= this.b.length) return;
+  var cap = this.b.length;
+  while (cap < this.n + k) cap *= 2;
+  var next = new Uint8Array(cap);
+  next.set(this.b.subarray(0, this.n));
+  this.b = next;
+};
+Bytes.prototype.u8  = function(v){ this.need(1); this.b[this.n++] = v & 255; };
+Bytes.prototype.u16 = function(v){ this.need(2); this.b[this.n++] = (v>>8)&255; this.b[this.n++] = v&255; };
+Bytes.prototype.u32 = function(v){ this.need(4);
+  this.b[this.n++] = (v>>>24)&255; this.b[this.n++] = (v>>>16)&255;
+  this.b[this.n++] = (v>>>8)&255;  this.b[this.n++] = v&255; };
+Bytes.prototype.str = function(s){ for (var i=0;i<s.length;i++) this.u8(s.charCodeAt(i)); };
+Bytes.prototype.raw = function(arr){ this.need(arr.length); this.b.set(arr, this.n); this.n += arr.length; };
+Bytes.prototype.at32 = function(pos, v){
+  this.b[pos] = (v>>>24)&255; this.b[pos+1] = (v>>>16)&255;
+  this.b[pos+2] = (v>>>8)&255; this.b[pos+3] = v&255; };
+Bytes.prototype.done = function(){ return this.b.subarray(0, this.n); };
+
+/* PackBits one scanline into the writer; returns the byte count written */
+function packRow(out, src, off, len){
+  var start = out.n, i = 0;
+  while (i < len){
+    if (i+1 < len && src[off+i] === src[off+i+1]){
+      var run = 2;
+      while (i+run < len && src[off+i+run] === src[off+i] && run < 128) run++;
+      out.u8(257 - run);
+      out.u8(src[off+i]);
+      i += run;
+    } else {
+      var lit = 1, from = i;
+      i++;
+      while (i < len && lit < 128){
+        if (i+1 < len && src[off+i] === src[off+i+1]) break;
+        i++; lit++;
+      }
+      out.u8(lit - 1);
+      for (var k=0;k<lit;k++) out.u8(src[off+from+k]);
+    }
+  }
+  return out.n - start;
+}
+
+/* one channel of an RGBA buffer, PackBits-compressed with its row table */
+function writeChannel(rgba, w, h, offset, out){
+  var row = new Uint8Array(w);
+  var counts = [], y, x;
+  var body = new Bytes();
+  for (y=0;y<h;y++){
+    for (x=0;x<w;x++) row[x] = rgba[(y*w + x)*4 + offset];
+    counts.push(packRow(body, row, 0, w));
+  }
+  out.u16(1);                              /* 1 = PackBits */
+  for (y=0;y<h;y++) out.u16(counts[y]);
+  out.raw(body.done());
+}
+function channelBytes(rgba, w, h, offset){
+  var tmp = new Bytes();
+  writeChannel(rgba, w, h, offset, tmp);
+  return tmp.done();
+}
+
+function pascalPad4(out, name){
+  var s = name.substring(0, 255);
+  var total = 1 + s.length;
+  out.u8(s.length);
+  out.str(s);
+  while (total % 4){ out.u8(0); total++; }
+}
+
+function buildPSD(w, h, sheets, merged){
+  var out = new Bytes(), i;
+
+  /* header */
+  out.str('8BPS'); out.u16(1);
+  for (i=0;i<6;i++) out.u8(0);
+  out.u16(3);                              /* channels in the composite */
+  out.u32(h); out.u32(w);
+  out.u16(8); out.u16(3);                  /* 8-bit, RGB */
+  out.u32(0);                              /* colour mode data */
+  out.u32(0);                              /* image resources */
+
+  /* pre-compress every layer channel so the channel table can state sizes */
+  var packed = sheets.map(function(s){
+    return { a: channelBytes(s.rgba, w, h, 3), r: channelBytes(s.rgba, w, h, 0),
+             g: channelBytes(s.rgba, w, h, 1), b: channelBytes(s.rgba, w, h, 2),
+             name: s.name, blend: s.blend, show: s.show };
+  });
+
+  var maskLenPos = out.n; out.u32(0);      /* layer + mask section length */
+  var infoLenPos = out.n; out.u32(0);      /* layer info length */
+  out.u16(sheets.length);
+
+  packed.forEach(function(p){
+    out.u32(0); out.u32(0); out.u32(h); out.u32(w);   /* top left bottom right */
+    out.u16(4);
+    out.u16(0xFFFF); out.u32(p.a.length);             /* -1 = alpha */
+    out.u16(0);      out.u32(p.r.length);
+    out.u16(1);      out.u32(p.g.length);
+    out.u16(2);      out.u32(p.b.length);
+    out.str('8BIM');
+    out.str(PSD_BLEND[p.blend] || 'norm');
+    out.u8(255);                                      /* opacity */
+    out.u8(0);                                        /* not clipped */
+    out.u8(p.show ? 0 : 2);                           /* bit 1 = hidden */
+    out.u8(0);
+    var extraPos = out.n; out.u32(0);
+    out.u32(0);                                       /* no layer mask */
+    out.u32(0);                                       /* no blending ranges */
+    pascalPad4(out, p.name);
+    out.at32(extraPos, out.n - extraPos - 4);
+  });
+
+  packed.forEach(function(p){
+    out.raw(p.a); out.raw(p.r); out.raw(p.g); out.raw(p.b);
+  });
+
+  if ((out.n - infoLenPos - 4) % 2) out.u8(0);        /* layer info stays even */
+  out.at32(infoLenPos, out.n - infoLenPos - 4);
+  out.u32(0);                                         /* global layer mask */
+  out.at32(maskLenPos, out.n - maskLenPos - 4);
+
+  /* Flattened composite. Unlike a layer, this section carries a single
+     compression flag, then every channel's row table back to back, then
+     all the pixel data. */
+  var row = new Uint8Array(w);
+  var bodies = [], tables = [], ch, y, x;
+  for (ch=0; ch<3; ch++){
+    var body = new Bytes(), counts = [];
+    for (y=0;y<h;y++){
+      for (x=0;x<w;x++) row[x] = merged[(y*w + x)*4 + ch];
+      counts.push(packRow(body, row, 0, w));
+    }
+    bodies.push(body.done());
+    tables.push(counts);
+  }
+  out.u16(1);
+  for (ch=0; ch<3; ch++)
+    for (y=0;y<h;y++) out.u16(tables[ch][y]);
+  for (ch=0; ch<3; ch++) out.raw(bodies[ch]);
+
+  return out.done();
+}
+
 /* ---------- export ---------- */
 /* The closing tag is written with an escaped slash — the conventional way
    to embed one script inside another without ending the outer block. */
@@ -828,12 +1066,14 @@ function buildViewer(){
   var title=(el.titleValue||'Wiggle').trim() || 'Wiggle';
   var state={ title:title, cmW:cmW, cmH:cmH,
     layers:layers.map(function(l){
-      return { hue:l.hue, blend:l.blend, show:l.show,
+      return { hue:l.hue, blend:l.blend, show:vis(l),
         ground:{opacity:l.ground.opacity, opDrift:l.ground.opDrift,
                 opSpeed:l.ground.opSpeed||1, seed:l.ground.seed||13, show:l.ground.show},
         wiggles:l.wiggles.map(function(w){
           return { id:w.id, sat:w.sat, w:w.w, wBase:w.wBase, tight:w.tight,
-            tx:w.tx, ty:w.ty, rot:w.rot, scale:w.scale, satDrift:w.satDrift,
+            tx:w.tx, ty:w.ty, rot:w.rot, scale:w.scale,
+            satDrift:w.satDrift, satSpeed:w.satSpeed||1,
+            wDrift:w.wDrift||0, wSpeed:w.wSpeed||1,
             drift:w.drift, speed:w.speed, show:w.show,
             brush:w.brush, load:w.load, swell:w.swell, bite:w.bite,
             pts:w.pts.map(function(p){ return {x:+p.x.toFixed(4), y:+p.y.toFixed(4)}; }) };
@@ -841,7 +1081,7 @@ function buildViewer(){
     }) };
 
   var fns=[clamp,lerp,hash2,noise2,hsv,catmull,tracePath,shift,
-    centre,place,viewPts,effSat,effOp,lineStroke,brushStroke]
+    centre,place,viewPts,effSat,effW,effOp,lineStroke,brushStroke]
     .map(function(f){ return f.toString(); }).join('\n');
 
   var esc=function(s){ return String(s).replace(/[<&]/g,function(c){ return c==='<'?'&lt;':'&amp;'; }); };
@@ -931,7 +1171,8 @@ function buildViewer(){
     '}',
     'var moves=layers.some(function(l){ if(!l.show) return false;',
     '  if (l.ground.show && l.ground.opDrift>0) return true;',
-    '  return l.wiggles.some(function(w){ return w.show && (w.drift>0||w.satDrift>0); }); }) &&',
+    '  return l.wiggles.some(function(w){',
+    '    return w.show && (w.drift>0||w.satDrift>0||w.wDrift>0); }); }) &&',
     '  !(window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches);',
     'function tick(){ t+=0.012; render(); raf=requestAnimationFrame(tick); }',
     'addEventListener("resize", function(){ fit(); render(); });',
@@ -940,6 +1181,150 @@ function buildViewer(){
     'if (moves) raf=requestAnimationFrame(tick);',
     CLOSE+'</body></html>'
   ].join('\n');
+}
+
+/* Draw every layer separately at export resolution and hand the lot to
+   the PSD encoder. Geometry is stored 0-1, so re-rendering large is just
+   a matter of pointing the globals at bigger buffers. */
+function exportPSD(){
+  var px = clamp(Math.round(el.psdPx && +el.psdPx.value) || 2000, 200, 8000);
+  var k = px / Math.max(cmW, cmH);
+  var pw = Math.max(1, Math.round(cmW * k)), ph = Math.max(1, Math.round(cmH * k));
+
+  var oldW=W, oldH=H, oldR=R, oldSheet=sheet, oldSheetC=sheetC, oldBuf=buf, oldBufC=bufC;
+  var sheets=[], i, j;
+  try {
+    W=pw; H=ph; R=Math.min(pw,ph);
+    sheetC=document.createElement('canvas'); sheetC.width=pw; sheetC.height=ph;
+    sheet=sheetC.getContext('2d');
+    bufC=document.createElement('canvas'); bufC.width=pw; bufC.height=ph;
+    buf=bufC.getContext('2d');
+
+    var mergedC=document.createElement('canvas'); mergedC.width=pw; mergedC.height=ph;
+    var merged=mergedC.getContext('2d');
+    merged.fillStyle='#ffffff'; merged.fillRect(0,0,pw,ph);
+
+    for (i=0;i<layers.length;i++){
+      var l=layers[i];
+      sheet.globalCompositeOperation='source-over';
+      sheet.globalAlpha=1;
+      sheet.clearRect(0,0,pw,ph);
+      if (l.ground.show){
+        sheet.globalAlpha=effOp(l.ground);
+        sheet.fillStyle=hsv(l.hue,100,BRI);
+        sheet.fillRect(0,0,pw,ph);
+        sheet.globalAlpha=1;
+      }
+      for (j=0;j<l.wiggles.length;j++){
+        var w=l.wiggles[j];
+        if (!w.show) continue;
+        var pts=viewPts(w);
+        if (w.brush) brushStroke(pts,w,l.hue); else lineStroke(pts,w,l.hue);
+      }
+      sheets.push({ name:'Layer '+(i+1), blend:l.blend, show:vis(l),
+                    rgba:sheet.getImageData(0,0,pw,ph).data });
+      if (vis(l)){
+        merged.globalCompositeOperation=l.blend;
+        merged.drawImage(sheetC,0,0);
+        merged.globalCompositeOperation='source-over';
+      }
+    }
+    var mergedData = merged.getImageData(0,0,pw,ph).data;
+    var bytes = buildPSD(pw, ph, sheets, mergedData);
+    download(new Blob([bytes],{type:'image/vnd.adobe.photoshop'}),
+             slug(el.titleValue||'Wiggle')+'.psd');
+    flash(el.psdBtn, 'Saved '+pw+'x'+ph);
+  } catch (err) {
+    flash(el.psdBtn, 'PSD failed: '+(err && err.message));
+  } finally {
+    W=oldW; H=oldH; R=oldR;
+    sheet=oldSheet; sheetC=oldSheetC; buf=oldBuf; bufC=oldBufC;
+    render();
+  }
+}
+
+/* A project file: everything the editor holds, in plain JSON. Small,
+   readable, and versioned so an old file still opens after the format
+   grows — anything missing falls back to the current default. */
+var PROJECT_VERSION = 1;
+
+function saveProject(){
+  var data = {
+    format:'wiggle-layers', version:PROJECT_VERSION,
+    title: el.titleValue || 'Wiggle',
+    cmW:cmW, cmH:cmH, hueStep:hueStep, spread:spread, newBlend:newBlend,
+    layers: layers.map(function(l){
+      return { hue:l.hue, blend:l.blend, mute:!!l.mute, solo:!!l.solo, open:l.open,
+        ground:{ opacity:l.ground.opacity, opDrift:l.ground.opDrift||0,
+                 opSpeed:l.ground.opSpeed||1, seed:l.ground.seed||13,
+                 show:l.ground.show, open:l.ground.open },
+        wiggles: l.wiggles.map(function(w){
+          return { sat:w.sat, w:w.w, wBase:w.wBase, tight:w.tight,
+            tx:w.tx, ty:w.ty, rot:w.rot, scale:w.scale,
+            satDrift:w.satDrift||0, satSpeed:w.satSpeed||1,
+            wDrift:w.wDrift||0, wSpeed:w.wSpeed||1,
+            drift:w.drift||0, speed:w.speed||1,
+            brush:!!w.brush, load:w.load, swell:w.swell, bite:w.bite,
+            n:w.n, maxN:w.maxN, show:w.show, open:w.open,
+            base: w.base.map(function(p){ return [ +p.x.toFixed(5), +p.y.toFixed(5) ]; }),
+            pts:  w.pts.map(function(p){  return [ +p.x.toFixed(5), +p.y.toFixed(5) ]; }) };
+        }) };
+    })
+  };
+  var text = JSON.stringify(data, null, 1);
+  download(new Blob([text],{type:'application/json'}), slug(data.title)+'.wiggle.json');
+  flash(el.saveBtn, 'Saved project');
+}
+
+function loadProject(text){
+  var d;
+  try { d = JSON.parse(text); }
+  catch (err) { flash(el.loadBtn, 'Not valid JSON'); return; }
+  if (!d || d.format !== 'wiggle-layers' || !d.layers){
+    flash(el.loadBtn, 'Not a wiggle project'); return;
+  }
+  var pick = function(v, fallback){ return (v === undefined || v === null) ? fallback : v; };
+  uid = 0;
+  cmW = pick(d.cmW, 60); cmH = pick(d.cmH, 60);
+  hueStep = pick(d.hueStep, 24);
+  spread = pick(d.spread, 0.35);
+  newBlend = pick(d.newBlend, 'multiply');
+  el.titleValue = pick(d.title, 'Wiggle');
+
+  layers = d.layers.map(function(L){
+    var l = newLayer(pick(L.hue,60), pick(L.blend,'source-over'));
+    l.mute = !!L.mute; l.solo = !!L.solo; l.open = pick(L.open, true);
+    var G = L.ground || {};
+    l.ground.opacity = pick(G.opacity, 0.5);
+    l.ground.opDrift = pick(G.opDrift, 0);
+    l.ground.opSpeed = pick(G.opSpeed, 1);
+    l.ground.seed    = pick(G.seed, l.ground.seed);
+    l.ground.show    = pick(G.show, true);
+    l.ground.open    = pick(G.open, false);
+    l.wiggles = (L.wiggles || []).map(function(Wg){
+      var w = newWiggle(0);
+      var keys = ['sat','w','wBase','tight','tx','ty','rot','scale',
+                  'satDrift','satSpeed','wDrift','wSpeed','drift','speed',
+                  'load','swell','bite','n','maxN'];
+      keys.forEach(function(k){ if (Wg[k] !== undefined) w[k] = Wg[k]; });
+      w.brush = !!Wg.brush;
+      w.show  = pick(Wg.show, true);
+      w.open  = pick(Wg.open, false);
+      var toPt = function(a){ return { x:a[0], y:a[1] }; };
+      if (Wg.base && Wg.base.length) w.base = Wg.base.map(toPt);
+      w.pts = (Wg.pts && Wg.pts.length) ? Wg.pts.map(toPt)
+                                        : w.base.map(function(p){ return {x:p.x,y:p.y}; });
+      w.n = w.pts.length;
+      return w;
+    });
+    return l;
+  });
+  if (!layers.length) layers = [newLayer(60,'source-over')];
+  fixActive();
+  build();
+  relayout();
+  refresh();
+  flash(el.loadBtn, 'Loaded');
 }
 
 function slug(s){
@@ -1030,8 +1415,27 @@ function boot(){
     layers.push(newLayer((layers[0].hue+hueStep*layers.length)%360, newBlend));
     build(); refresh();
   });
+  el.clearSolo = document.getElementById('clearSolo');
+  el.clearSolo.addEventListener('click', function(){
+    for (var i=0;i<layers.length;i++) layers[i].solo=false;
+    build(); refresh();
+  });
+  el.saveBtn = document.getElementById('saveProject');
+  el.loadBtn = document.getElementById('loadProject-l');
+  el.saveBtn.addEventListener('click', saveProject);
+  document.getElementById('loadProject').addEventListener('change', function(e){
+    var f = e.target.files && e.target.files[0];
+    if (!f) return;
+    var fr = new FileReader();
+    fr.onload = function(){ loadProject(String(fr.result)); };
+    fr.readAsText(f);
+    e.target.value = '';                 /* so the same file can be reloaded */
+  });
   el.exportBtn.addEventListener('click', doExport);
   document.getElementById('save').addEventListener('click', savePNG);
+  el.psdPx = document.getElementById('psdPx');
+  el.psdBtn = document.getElementById('psd');
+  el.psdBtn.addEventListener('click', exportPSD);
   document.getElementById('reset').addEventListener('click', function(){
     resetAll(); build(); refresh();
   });
