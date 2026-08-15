@@ -504,6 +504,7 @@ function moving(){
 function tick(){ t+=0.012; render(); raf=requestAnimationFrame(tick); }
 function refresh(){
   if (el.clearSolo) el.clearSolo.style.display = anySolo() ? 'block' : 'none';
+  queueSave();
   var ds=document.querySelectorAll('#panels details');
   for (var i=0;i<ds.length;i++) if (ds[i]._paint) ds[i]._paint();
   if (moving()){ if(!raf) raf=requestAnimationFrame(tick); }
@@ -570,6 +571,7 @@ function onUp(){
     drag.w.base = drag.w.pts.map(function(p){return {x:p.x,y:p.y};});
     drag = null;
     render();
+    queueSave();
   }
   /* a clean click — no anchor grabbed, no movement — toggles the preview */
   if (!wasDrag && !moved && el.fs && el.fs.checked) setFull(!isFull);
@@ -1248,8 +1250,8 @@ function exportPSD(){
    grows — anything missing falls back to the current default. */
 var PROJECT_VERSION = 1;
 
-function saveProject(){
-  var data = {
+function projectData(){
+  return {
     format:'wiggle-layers', version:PROJECT_VERSION,
     title: el.titleValue || 'Wiggle',
     cmW:cmW, cmH:cmH, hueStep:hueStep, spread:spread, newBlend:newBlend,
@@ -1271,17 +1273,59 @@ function saveProject(){
         }) };
     })
   };
-  var text = JSON.stringify(data, null, 1);
-  download(new Blob([text],{type:'application/json'}), slug(data.title)+'.wiggle.json');
+}
+
+function saveProject(){
+  var data = projectData();
+  download(new Blob([JSON.stringify(data, null, 1)],{type:'application/json'}),
+           slug(data.title)+'.wiggle.json');
   flash(el.saveBtn, 'Saved project');
 }
 
-function loadProject(text){
+/* ---------- autosave ----------
+   The working state is written to this browser's local storage a moment
+   after every change, and read back when the page opens. It survives a
+   refresh, a closed tab and a crash. It is per-browser, not a file — so
+   it complements Save project rather than replacing it. Every call is
+   guarded: private windows and blocked storage simply mean no autosave
+   rather than a broken editor. */
+var AUTOKEY = 'wiggle-layers:autosave';
+var autoTimer = null;
+
+function store(){
+  try { return window.localStorage; } catch (err) { return null; }
+}
+function autosaveNow(){
+  var ls = store();
+  if (!ls) return;
+  try { ls.setItem(AUTOKEY, JSON.stringify(projectData())); }
+  catch (err) {}                                  /* quota or private mode */
+}
+function queueSave(){
+  if (autoTimer) clearTimeout(autoTimer);
+  autoTimer = setTimeout(autosaveNow, 700);       /* after the slider settles */
+}
+function clearAutosave(){
+  var ls = store();
+  if (!ls) return;
+  try { ls.removeItem(AUTOKEY); } catch (err) {}
+}
+function restoreAutosave(){
+  var ls = store();
+  if (!ls) return false;
+  var text;
+  try { text = ls.getItem(AUTOKEY); } catch (err) { return false; }
+  if (!text) return false;
+  try { loadProject(text, true); return true; }
+  catch (err) { clearAutosave(); return false; }
+}
+
+function loadProject(text, quiet){
   var d;
   try { d = JSON.parse(text); }
-  catch (err) { flash(el.loadBtn, 'Not valid JSON'); return; }
+  catch (err) { if (!quiet) flash(el.loadBtn, 'Not valid JSON'); return; }
   if (!d || d.format !== 'wiggle-layers' || !d.layers){
-    flash(el.loadBtn, 'Not a wiggle project'); return;
+    if (!quiet) flash(el.loadBtn, 'Not a wiggle project'); return;
   }
   var pick = function(v, fallback){ return (v === undefined || v === null) ? fallback : v; };
   uid = 0;
@@ -1324,7 +1368,7 @@ function loadProject(text){
   build();
   relayout();
   refresh();
-  flash(el.loadBtn, 'Loaded');
+  if (!quiet) flash(el.loadBtn, 'Loaded');
 }
 
 function slug(s){
@@ -1437,6 +1481,7 @@ function boot(){
   el.psdBtn = document.getElementById('psd');
   el.psdBtn.addEventListener('click', exportPSD);
   document.getElementById('reset').addEventListener('click', function(){
+    clearAutosave();
     resetAll(); build(); refresh();
   });
 
@@ -1452,14 +1497,21 @@ function boot(){
     if (e.key==='Escape' && isFull) setFull(false);
     if (e.key==='f' && el.fs && el.fs.checked) setFull(!isFull);
     if (e.key==='s') savePNG();
-    if (e.key==='r'){ resetAll(); build(); refresh(); }
+    if (e.key==='r'){ clearAutosave(); resetAll(); build(); refresh(); }
   });
 
   el.note.textContent='Open a wiggle to make it active, tick anchors, then drag its dots.';
   resetAll();
-  build();
-  relayout();
-  refresh();
+  var restored = restoreAutosave();      /* picks up where the last session stopped */
+  if (!restored){ build(); relayout(); refresh(); }
+  if (restored) el.note.textContent =
+    'Picked up where you left off. Reset clears this and starts fresh.';
+
+  /* one last write when the tab goes away, in case a change was still pending */
+  window.addEventListener('beforeunload', autosaveNow);
+  document.addEventListener('visibilitychange', function(){
+    if (document.visibilityState === 'hidden') autosaveNow();
+  });
   if (window.requestAnimationFrame)
     requestAnimationFrame(function(){ fit(); render(); });
 }
