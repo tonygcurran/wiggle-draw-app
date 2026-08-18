@@ -168,7 +168,14 @@ var cmW = 60, cmH = 60, W = 520, H = 520, R = 520, DPR = 1;
 var cv, ctx, sheetC, sheet, bufC, buf;
 var layers = [], activeId = null, uid = 0, drag = null, t = 0, raf = null, tmr = null;
 var spread = 0.35, hueStep = 24, newBlend = 'multiply';
-var refImg = null, refOpacity = 0.5, refOnTop = true, refShow = true;
+/* Strokes never overlap their neighbours. Always on, and always confined
+   to one layer — marks on different layers are meant to cross. */
+var sepGap = 6, sepThin = true, sepThinnest = 0.3;
+/* The reference is layer 1: the surface everything else is painted onto,
+   at full strength beneath the stack. It can be floated above the work
+   when you want to trace against your own marks instead. */
+var refImg = null, refOpacity = 1, refOnTop = false, refShow = true;
+var refBlend = 'source-over';
 var lastDoc = null, lastName = 'wiggle.html';
 var COARSE = false, HIT = 14, DOT = 8;
 var isFull = false, downAt = null, moved = false;
@@ -244,7 +251,8 @@ function jitter(pts, amt, seed){
 function newWiggle(seed){
   var base = jitter(DEFAULT_PTS.map(function(p){return {x:p[0],y:p[1]};}), spread, seed);
   return { id:++uid, base:base, pts:base.map(function(p){return {x:p.x,y:p.y};}),
-    n:base.length, maxN:60, sat:50, w:1, wBase:0.09, tight:0,
+    n:base.length, maxN:60, grow:'both', reach:0.08, seedLen:base.length,
+    sat:50, w:1, wBase:0.09, tight:0,
     tx:0, ty:0, rot:0, scale:1,
     satDrift:0, satSpeed:1, wDrift:0, wSpeed:1,
     drift:0, speed:1, brush:false, load:0.35, swell:0.25, bite:0.30,
@@ -256,7 +264,10 @@ function newLayer(hue, blend){
     ground:{opacity:0.5, opDrift:0, opSpeed:1, seed:id*13, show:true, open:false},
     wiggles:[] };
 }
-function resetAll(){ uid=0; layers=[newLayer(60,'source-over')]; activeId=null; }
+/* The bottom layer multiplies like every other. On white that reads the
+   same as normal, since white is multiply's identity — but over a
+   reference photo the difference is the whole point. */
+function resetAll(){ uid=0; layers=[newLayer(60,'multiply')]; activeId=null; }
 function cloneWiggle(w, amt, seed){
   var base = jitter(w.base, amt, seed);
   var c = {}; for (var k in w) c[k]=w[k];
@@ -286,6 +297,69 @@ function activeW(){
       if (layers[i].wiggles[j].id===activeId) return {l:layers[i], w:layers[i].wiggles[j]};
   }
   return null;
+}
+
+/* Which slice of the stored path is currently in play. Anchors beyond the
+   slider are kept, not discarded, so winding it back and forth is
+   non-destructive. */
+function span(w){
+  var len = w.base.length, n = Math.min(w.n, len);
+  if (w.grow === 'start') return len - n;
+  if (w.grow === 'both')  return Math.floor((len - n) / 2);
+  return 0;
+}
+
+/* Extend the path by continuing its own direction, turned by a little
+   noise so it wanders instead of shooting off in a straight line. The
+   new point steers back inside if it strays past the edge. */
+function growOne(pts, atEnd, reach){
+  var b = atEnd ? pts[pts.length-1] : pts[0];
+  var a = atEnd ? pts[pts.length-2] : pts[1];
+  if (!a) a = { x: b.x - 0.08, y: b.y - 0.04 };
+  var dx = b.x - a.x, dy = b.y - a.y;
+  /* a set reach rather than the last segment's length, so a new anchor
+     lands just beyond the tip instead of a third of the way across */
+  var step = reach || 0.08;
+  var ang = Math.atan2(dy, dx) +
+            (noise2(pts.length * 3.7 + (atEnd ? 0 : 91), 5) - 0.5) * 1.5;
+  var nx = b.x + Math.cos(ang) * step;
+  var ny = b.y + Math.sin(ang) * step;
+  /* if it has wandered outside, aim the next step back toward the middle */
+  if (nx < 0.02 || nx > 0.98 || ny < 0.02 || ny > 0.98){
+    var back = Math.atan2(0.5 - b.y, 0.5 - b.x);
+    nx = b.x + Math.cos(back) * step;
+    ny = b.y + Math.sin(back) * step;
+  }
+  return { x: clamp(nx, 0.01, 0.99), y: clamp(ny, 0.01, 0.99) };
+}
+function growTo(w, n){
+  var reach = w.reach || 0.08;
+  var seed = w.seedLen || w.base.length;
+  while (w.base.length < n){
+    /* Parity comes from how far the path has grown past its original
+       length, not from a counter local to this call — the slider adds one
+       anchor per call, so a local counter always said "first". */
+    var idx = w.base.length - seed;
+    if (w.grow === 'start') w.base.unshift(growOne(w.base, false, reach));
+    else if (w.grow === 'both'){
+      if (idx % 2) w.base.unshift(growOne(w.base, false, reach));
+      else w.base.push(growOne(w.base, true, reach));
+    }
+    else w.base.push(growOne(w.base, true, reach));
+  }
+}
+
+/* Set the anchor count: grow the path from its ends, or redistribute the
+   points along the shape you already have. */
+function setAnchors(w, n){
+  w.n = n;
+  if (w.grow === 'resample'){
+    w.pts = resample(w.base, n);
+    return;
+  }
+  growTo(w, n);
+  var from = span(w);
+  w.pts = w.base.slice(from, from + n).map(function(p){ return {x:p.x, y:p.y}; });
 }
 
 /* Resample along the spline's own arc length, measured in pixels so it
@@ -387,6 +461,104 @@ function shift(pt,i,w){
            y: pt.y+(noise2(s+i+99,u)-0.5)*0.22*w.drift };
 }
 
+/* ---------- keeping wiggles off each other ----------
+   A relaxation pass, run at draw time so it holds while things drift.
+   Each anchor is compared against the other wiggles' actual curves — not
+   just their anchors — and pushed out along the shortest line between
+   them until the two strokes clear each other by the layer's gap. A few
+   passes settle it; the stored path is never touched, so this constrains
+   what you see without editing what you drew. */
+function strokeRadius(w){
+  return w.wBase * R * effW(w) * w.scale / 2;
+}
+function polyline(pts, tight){
+  var pad=[pts[0]].concat(pts,[pts[pts.length-1]]), out=[], i, k;
+  for (i=0;i<pad.length-3;i++)
+    for (k=(i===0?0:1); k<=8; k++){
+      var q=catmull(pad[i],pad[i+1],pad[i+2],pad[i+3],k/8,tight);
+      out.push({ x:q.x*W, y:q.y*H });
+    }
+  return out;
+}
+/* shortest distance from a point to a segment, and the direction away */
+function pushOff(px, py, a, b){
+  var vx=b.x-a.x, vy=b.y-a.y;
+  var L=vx*vx+vy*vy;
+  var t = L>0 ? ((px-a.x)*vx + (py-a.y)*vy)/L : 0;
+  t = t<0?0:(t>1?1:t);
+  var cx=a.x+vx*t, cy=a.y+vy*t;
+  var dx=px-cx, dy=py-cy;
+  var d=Math.sqrt(dx*dx+dy*dy);
+  if (d > 1e-6) return { d:d, nx:dx/d, ny:dy/d };
+  /* Sitting exactly on the other curve there is no direction to push, so
+     step off sideways along the segment's normal. Callers flip the sign
+     per pair, or two coincident strokes would shove the same way and
+     never part. */
+  var len = Math.sqrt(L) || 1;
+  return { d:0, nx:-vy/len, ny:vx/len };
+}
+function keepApart(items, gap, thin, thinnest){
+  var passes=4, p, i, j, k, m;
+  /* wid[i][k] is how wide anchor k of wiggle i is allowed to be, as a
+     fraction of its set weight — 1 means untouched */
+  for (i=0;i<items.length;i++){
+    items[i].wid = [];
+    for (k=0;k<items[i].pts.length;k++) items[i].wid.push(1);
+  }
+  var floor = thin ? clamp(thinnest, 0.05, 1) : 1;
+
+  for (p=0;p<passes;p++){
+    var lines=[];
+    for (i=0;i<items.length;i++) lines.push(polyline(items[i].pts, items[i].w.tight));
+    var moved=false;
+    for (i=0;i<items.length;i++){
+      for (k=0;k<items[i].pts.length;k++){
+        var ax=items[i].pts[k].x*W, ay=items[i].pts[k].y*H;
+        var ri = strokeRadius(items[i].w) * items[i].wid[k];
+        for (j=0;j<items.length;j++){
+          if (j===i) continue;
+          var rj = strokeRadius(items[j].w) * (items[j].wid[k] !== undefined ? 1 : 1);
+          var need = ri + strokeRadius(items[j].w) + gap;
+          var line = lines[j];
+          var best=null;
+          for (m=1;m<line.length;m++){
+            var hit = pushOff(ax, ay, line[m-1], line[m]);
+            if (!best || hit.d < best.d) best = hit;
+          }
+          if (best && best.d < need){
+            var short = need - best.d;
+            /* Width yields first, up to the floor. It costs nothing to
+               move and resolves crowding the position pass alone cannot,
+               then the rest is taken up by shifting the anchor. */
+            var give = 0;
+            if (floor < 1){
+              var lowest = strokeRadius(items[i].w) * floor;
+              var room = ri - lowest;
+              give = Math.min(room, short * 0.6);
+              if (give > 0){
+                ri -= give;
+                items[i].wid[k] = ri / strokeRadius(items[i].w);
+                short -= give;
+                moved = true;
+              }
+            }
+            if (short > 0){
+              var shove = short * 0.5;
+              var sign = best.d > 1e-6 ? 1 : (i < j ? 1 : -1);
+              ax += best.nx * shove * sign;
+              ay += best.ny * shove * sign;
+              moved = true;
+            }
+          }
+        }
+        items[i].pts[k] = { x: clamp(ax/W, -0.15, 1.15), y: clamp(ay/H, -0.15, 1.15) };
+      }
+    }
+    if (!moved) break;
+  }
+  return items;
+}
+
 /* ---------- drawing ---------- */
 function render(){
   ctx.globalCompositeOperation='source-over';
@@ -407,11 +579,15 @@ function render(){
       sheet.fillRect(0,0,W,H);
       sheet.globalAlpha=1;
     }
+    var items=[];
     for (var j=0;j<l.wiggles.length;j++){
-      var w=l.wiggles[j];
-      if (!w.show) continue;
-      var pts=viewPts(w);
-      if (w.brush) brushStroke(pts,w,l.hue); else lineStroke(pts,w,l.hue);
+      if (!l.wiggles[j].show) continue;
+      items.push({ w:l.wiggles[j], pts:viewPts(l.wiggles[j]) });
+    }
+    if (items.length > 1) keepApart(items, sepGap, sepThin, sepThinnest);
+    for (j=0;j<items.length;j++){
+      if (items[j].w.brush) brushStroke(items[j].pts, items[j].w, l.hue, items[j].wid);
+      else lineStroke(items[j].pts, items[j].w, l.hue, items[j].wid);
     }
     ctx.globalCompositeOperation=l.blend;
     ctx.drawImage(sheetC,0,0,W,H);
@@ -425,10 +601,64 @@ function drawRef(){
   var k=Math.min(W/refImg.width, H/refImg.height);
   var dw=refImg.width*k, dh=refImg.height*k;
   ctx.globalAlpha=refOpacity;
+  ctx.globalCompositeOperation=refBlend;
   ctx.drawImage(refImg,(W-dw)/2,(H-dh)/2,dw,dh);
+  ctx.globalCompositeOperation='source-over';
   ctx.globalAlpha=1;
 }
-function lineStroke(pts,w,hue){
+/* A stroke of varying width, drawn as an offset ribbon: sample the curve,
+   step out along each normal by that point's half-width, and fill the
+   band between the two edges. Round caps are added as discs so the ends
+   match a plain round-capped stroke. */
+function ribbonStroke(pts, w, hue, wid){
+  var pad=[pts[0]].concat(pts,[pts[pts.length-1]]);
+  var segs=pad.length-3, steps=10, i, k;
+  var S=[], WD=[];
+  for (i=0;i<segs;i++){
+    for (k=(i===0?0:1); k<=steps; k++){
+      var u=k/steps;
+      var q=catmull(pad[i],pad[i+1],pad[i+2],pad[i+3],u,w.tight);
+      S.push({ x:q.x*W, y:q.y*H });
+      /* the multiplier belongs to the anchors, so read across the segment */
+      var a0 = wid[i] === undefined ? 1 : wid[i];
+      var a1 = wid[i+1] === undefined ? 1 : wid[i+1];
+      WD.push(lerp(a0, a1, u));
+    }
+  }
+  var half = strokeRadius(w);
+  var n=S.length;
+  if (n < 2) return;
+  var left=[], right=[];
+  for (i=0;i<n;i++){
+    var a = S[Math.max(0,i-1)], b = S[Math.min(n-1,i+1)];
+    var tx=b.x-a.x, ty=b.y-a.y;
+    var L=Math.sqrt(tx*tx+ty*ty) || 1;
+    var nx=-ty/L, ny=tx/L;
+    var h=half*WD[i];
+    left.push({ x:S[i].x+nx*h, y:S[i].y+ny*h });
+    right.push({ x:S[i].x-nx*h, y:S[i].y-ny*h });
+  }
+  sheet.fillStyle=hsv(hue,effSat(w),BRI);
+  sheet.beginPath();
+  sheet.moveTo(left[0].x,left[0].y);
+  for (i=1;i<n;i++) sheet.lineTo(left[i].x,left[i].y);
+  for (i=n-1;i>=0;i--) sheet.lineTo(right[i].x,right[i].y);
+  sheet.closePath();
+  sheet.fill();
+  /* round the two ends */
+  sheet.beginPath();
+  sheet.arc(S[0].x,S[0].y, half*WD[0], 0, Math.PI*2);
+  sheet.fill();
+  sheet.beginPath();
+  sheet.arc(S[n-1].x,S[n-1].y, half*WD[n-1], 0, Math.PI*2);
+  sheet.fill();
+}
+
+function lineStroke(pts,w,hue,wid){
+  if (wid){
+    for (var i=0;i<wid.length;i++)
+      if (wid[i] < 0.999) return ribbonStroke(pts, w, hue, wid);
+  }
   sheet.strokeStyle=hsv(hue,effSat(w),BRI);
   sheet.lineWidth=w.wBase*R*effW(w)*w.scale;
   sheet.lineCap='round'; sheet.lineJoin='round';
@@ -438,13 +668,18 @@ function lineStroke(pts,w,hue){
 /* Stamped at varying width: load runs the brush dry along its length,
    swell thickens and thins it irregularly, bite narrows the mark where
    the curve turns hardest — the way a brush does through a corner. */
-function brushStroke(pts,w,hue){
+function brushStroke(pts,w,hue,wid){
   var pad=[pts[0]].concat(pts,[pts[pts.length-1]]);
   var base=w.wBase*R*effW(w)*w.scale, segs=pad.length-3, steps=40, i, k;
-  var s=[];
+  var s=[], squeeze=[];
   for (i=0;i<segs;i++)
-    for (k=(i===0?0:1);k<=steps;k++)
+    for (k=(i===0?0:1);k<=steps;k++){
       s.push(catmull(pad[i],pad[i+1],pad[i+2],pad[i+3],k/steps,w.tight));
+      if (wid){
+        var a0 = wid[i]===undefined?1:wid[i], a1 = wid[i+1]===undefined?1:wid[i+1];
+        squeeze.push(lerp(a0,a1,k/steps));
+      } else squeeze.push(1);
+    }
   var n=s.length, curv=[];
   for (i=0;i<n;i++){
     if (i===0||i===n-1){ curv.push(0); continue; }
@@ -464,7 +699,7 @@ function brushStroke(pts,w,hue){
     var load=1+w.load*(0.5-g)*1.6;
     var sw=1+w.swell*(noise2(w.id*11+g*7)-0.5)*2.4;
     var bite=1-w.bite*Math.min(1,curv[i]/24);
-    var d=base*Math.max(0.04, load*sw*bite);
+    var d=base*Math.max(0.04, load*sw*bite)*squeeze[i];
     buf.beginPath();
     buf.arc(s[i].x*W, s[i].y*H, d/2, 0, Math.PI*2);
     buf.fill();
@@ -568,7 +803,16 @@ function onMove(e){
 function onUp(){
   var wasDrag = !!drag;
   if (drag) {
-    drag.w.base = drag.w.pts.map(function(p){return {x:p.x,y:p.y};});
+    var w = drag.w;
+    if (w.grow === 'resample'){
+      w.base = w.pts.map(function(p){ return {x:p.x, y:p.y}; });
+    } else {
+      /* write the moved anchors back into their place in the stored path,
+         leaving anchors outside the current slice untouched */
+      var from = span(w);
+      for (var i=0;i<w.pts.length;i++)
+        w.base[from+i] = { x:w.pts[i].x, y:w.pts[i].y };
+    }
     drag = null;
     render();
     queueSave();
@@ -689,8 +933,12 @@ function section(host,title,colFn,open,o){
   d.appendChild(s); d.appendChild(body); host.appendChild(d);
   d._paint=function(){
     sw.style.background=colFn();
-    if (o.isOn) d.className = o.isOn() ? 'on' : '';
-    if (o.isOff && o.isOff()) d.className += ' off';
+    /* rebuild the class list every time — appending to it meant a panel
+       once dimmed stayed dimmed, and the string grew without bound */
+    var cls = [];
+    if (o.isOn && o.isOn()) cls.push('on');
+    if (o.isOff && o.isOff()) cls.push('off');
+    d.className = cls.join(' ');
     toggles.forEach(function(t){ t[0].className = t[1].active() ? 'on' : ''; });
   };
   return body;
@@ -713,6 +961,12 @@ function build(){
   var tr=document.createElement('div'); tr.className='row';
   tr.appendChild(tl); tr.appendChild(ti); cb.appendChild(tr);
 
+  /* --- Layer 1: the reference --- */
+  var rb=section(host,'Layer 1 \u00B7 Reference',
+    function(){ return refImg ? '#7A736A' : '#EFEDE4'; }, !refImg, {
+      isOff:function(){ return !!refImg && !refShow; }
+    });
+
   var fl=document.createElement('input'); fl.type='file'; fl.accept='image/*';
   fl.addEventListener('change',function(e){
     var f=e.target.files && e.target.files[0]; if(!f) return;
@@ -724,14 +978,20 @@ function build(){
     };
     fr.readAsDataURL(f);
   });
-  var fh=document.createElement('p'); fh.className='hint'; fh.textContent='reference image';
-  cb.appendChild(fh); cb.appendChild(fl);
+  var fh=document.createElement('p'); fh.className='hint';
+  fh.textContent = refImg ? 'replace the image' : 'choose an image';
+  rb.appendChild(fh); rb.appendChild(fl);
   if (refImg){
-    slider(cb,'reference opacity',0,1,0.01,refOpacity,function(v){return v.toFixed(2);},
+    slider(rb,'opacity',0,1,0.01,refOpacity,function(v){return v.toFixed(2);},
       function(v){ refOpacity=v; render(); });
-    check(cb,'show reference',refShow,function(v){ refShow=v; render(); });
-    check(cb,'over the painting',refOnTop,function(v){ refOnTop=v; render(); });
-    var m=document.createElement('div'); m.className='mini'; cb.appendChild(m);
+    picker(rb,'blend',MODES,refBlend,function(v){ refBlend=v; render(); });
+    check(rb,'visible',refShow,function(v){ refShow=v; render(); });
+    check(rb,'float above all layers',refOnTop,function(v){ refOnTop=v; render(); });
+    var rh=document.createElement('p'); rh.className='hint';
+    rh.textContent='The base everything else is painted onto. Float it above '+
+      'the work when you want to trace against your own marks.';
+    rb.appendChild(rh);
+    var m=document.createElement('div'); m.className='mini'; rb.appendChild(m);
     btn(m,'Use its shape',function(){
       var k=100/Math.max(refImg.width,refImg.height);
       cmW=Math.round(refImg.width*k*10)/10;
@@ -739,6 +999,10 @@ function build(){
       build(); relayout();
     });
     btn(m,'Remove',function(){ refImg=null; build(); render(); });
+  } else {
+    var eh=document.createElement('p'); eh.className='hint';
+    eh.textContent='No reference loaded. Without one the layers below sit on white.';
+    rb.appendChild(eh);
   }
 
   /* defaults for new things */
@@ -748,9 +1012,22 @@ function build(){
     function(v){ hueStep=v; refresh(); });
   picker(nb,'blend mode',MODES,newBlend,function(v){ newBlend=v; });
 
+  var sb=section(host,'Stroke spacing',function(){return '#EFEDE4';},false);
+  slider(sb,'gap between strokes, px',0,40,1,sepGap,
+    function(v){return v.toFixed(0)+'px';}, function(v){ sepGap=v; refresh(); });
+  check(sb,'let strokes thin to fit',sepThin,function(v){ sepThin=v; refresh(); });
+  slider(sb,'thinnest allowed',0.05,1,0.01,sepThinnest,
+    function(v){return Math.round(v*100)+'%';}, function(v){ sepThinnest=v; refresh(); });
+  var sh=document.createElement('p'); sh.className='hint';
+  sh.textContent='Wiggles never overlap others on their own layer. Width gives way '+
+    'first, narrowing only where a stroke passes close to a neighbour; the rest is '+
+    'taken up by shifting. Layers still cross each other freely, and anchors always '+
+    'show where you actually drew.';
+  sb.appendChild(sh);
+
   /* the layers */
   layers.forEach(function(l,li){
-    var lb=section(host,'Layer '+(li+1),function(){return hex(l.hue,100,BRI);},l.open,{
+    var lb=section(host,'Layer '+(li+2),function(){return hex(l.hue,100,BRI);},l.open,{
       onToggle:function(o){ l.open=o; },
       isOff:function(){ return !vis(l); },
       toggles:[
@@ -771,6 +1048,10 @@ function build(){
     hueSlider = slider(lb,'hue (whole layer)',0,360,1,l.hue,function(v){return v.toFixed(0);},
       function(v){ l.hue=v; markPal(); refresh(); });
     picker(lb,'blend onto layers below',MODES,l.blend,function(v){ l.blend=v; refresh(); });
+    var ah=document.createElement('p'); ah.className='hint';
+    ah.textContent='Holds the strokes on this layer clear of one another as they '+
+      'drift. Anchors still show where you actually drew.';
+    lb.appendChild(ah);
     check(lb,'mute',l.mute,function(v){ l.mute=v; refresh(); });
     check(lb,'solo',l.solo,function(v){ l.solo=v; refresh(); });
 
@@ -832,11 +1113,18 @@ function build(){
       slider(wb,'brush bite',0,1,0.01,w.bite,function(v){return v.toFixed(2);},
         function(v){ w.bite=v; refresh(); });
 
+      picker(wb,'anchors grow from',
+        [['both','both ends, alternating'],['end','the end'],['start','the start'],
+         ['resample','nowhere (redistribute)']],
+        w.grow||'both', function(v){ w.grow=v; setAnchors(w, w.n); refresh(); });
+      slider(wb,'growth reach',0.01,0.40,0.005,w.reach||0.08,
+        function(v){return v.toFixed(3);},
+        function(v){ w.reach=v; refresh(); });
       var ns = slider(wb,'anchors',3,w.maxN,1,w.n,function(v){return v.toFixed(0);},
-        function(v){ w.n=v; w.pts=resample(w.base,v); refresh(); });
+        function(v){ setAnchors(w, v); refresh(); });
       num(wb,'max anchors',w.maxN,3,400,function(v){
         w.maxN=v; ns.max=v;
-        if (+ns.value>v){ ns.value=v; w.n=v; w.pts=resample(w.base,v); refresh(); }
+        if (+ns.value>v){ ns.value=v; setAnchors(w, v); refresh(); }
       });
       check(wb,'visible',w.show,function(v){ w.show=v; refresh(); });
 
@@ -1064,6 +1352,19 @@ function buildPSD(w, h, sheets, merged){
    to embed one script inside another without ending the outer block. */
 var OPEN = '<script>', CLOSE = '<\/script>';
 
+/* The exported piece has to carry its own reference: re-encode the loaded
+   image through a canvas so it travels as a data URL inside the file. */
+function refDataURL(){
+  if (!refImg) return '';
+  try {
+    var c=document.createElement('canvas');
+    var k=Math.min(1400/refImg.width, 1400/refImg.height, 1);
+    c.width=Math.round(refImg.width*k); c.height=Math.round(refImg.height*k);
+    c.getContext('2d').drawImage(refImg,0,0,c.width,c.height);
+    return c.toDataURL('image/jpeg', 0.82);
+  } catch (err) { return ''; }
+}
+
 function buildViewer(){
   var title=(el.titleValue||'Wiggle').trim() || 'Wiggle';
   var state={ title:title, cmW:cmW, cmH:cmH,
@@ -1083,7 +1384,8 @@ function buildViewer(){
     }) };
 
   var fns=[clamp,lerp,hash2,noise2,hsv,catmull,tracePath,shift,
-    centre,place,viewPts,effSat,effW,effOp,lineStroke,brushStroke]
+    centre,place,viewPts,effSat,effW,effOp,
+    strokeRadius,polyline,pushOff,keepApart,lineStroke,brushStroke]
     .map(function(f){ return f.toString(); }).join('\n');
 
   var esc=function(s){ return String(s).replace(/[<&]/g,function(c){ return c==='<'?'&lt;':'&amp;'; }); };
@@ -1094,13 +1396,22 @@ function buildViewer(){
     '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">',
     '<title>'+esc(title)+'</title>','<style>',
     'html,body{margin:0;height:100%;background:#EFEDE4;overflow:hidden}',
+    /* iOS only bubbles taps from elements that look interactive, so the
+        whole body carries a pointer cursor */
     'body{display:flex;align-items:center;justify-content:center;',
+    '  cursor:pointer;touch-action:manipulation;',
+    '  -webkit-tap-highlight-color:transparent;',
     '  transition:background .25s ease}',
     'body.full{background:#000}',
     'canvas{display:block;cursor:pointer;box-shadow:0 10px 40px rgba(0,0,0,.15)}',
     'body.full canvas{box-shadow:none}',
     '</style></head><body>'+OPEN,
     'var BRI=100;',
+    'var SEP=' + JSON.stringify({gap:sepGap, thin:sepThin, thinnest:sepThinnest}) + ';',
+    (refImg && refShow ? 'var REF=new Image(); REF.src=' + JSON.stringify(refDataURL()) + ';'
+                       : 'var REF=null;'),
+    'var REF_OP=' + refOpacity + ', REF_BLEND=' + JSON.stringify(refBlend) +
+      ', REF_TOP=' + (refOnTop ? 'true' : 'false') + ';',
     'var STATE='+json+';',
     'var layers=STATE.layers;',
     'var W=0,H=0,R=0,DPR=1,t=0,raf=null;',
@@ -1111,8 +1422,10 @@ function buildViewer(){
     fns,
     'var full=false;',
     'function fit(){',
-    '  /* fullscreen fills the screen edge to edge; windowed leaves a margin */',
-    '  var k = Math.min(innerWidth/STATE.cmW, innerHeight/STATE.cmH);',
+    '  /* visualViewport excludes the iOS toolbars; innerHeight does not */',
+    '  var vw = (window.visualViewport && window.visualViewport.width)  || innerWidth;',
+    '  var vh = (window.visualViewport && window.visualViewport.height) || innerHeight;',
+    '  var k = Math.min(vw/STATE.cmW, vh/STATE.cmH);',
     '  if (!full) k *= 0.92;            /* windowed leaves a little air */',
     '  W=Math.max(80,Math.round(STATE.cmW*k)); H=Math.max(80,Math.round(STATE.cmH*k));',
     '  R=Math.min(W,H); DPR=Math.min(2, window.devicePixelRatio||1);',
@@ -1145,7 +1458,11 @@ function buildViewer(){
     '  } catch (err) {}',
     '  apply();',
     '}',
-    'addEventListener("click", toggle);',
+    '/* Bind exactly one of these. Listening to several means a single tap',
+    '   fires twice and cancels itself out. Pointer events cover iOS 13+,',
+    '   touch and mouse alike; older browsers fall back to click. */',
+    'if (window.PointerEvent) addEventListener("pointerup", toggle);',
+    'else addEventListener("click", toggle);',
     'addEventListener("keydown", function(e){',
     '  if (e.key === "Escape" && full) { full=false; apply(); }',
     '  if (e.key === "f" || e.key === "Enter") toggle();',
@@ -1157,20 +1474,35 @@ function buildViewer(){
     'document.addEventListener("webkitfullscreenchange", function(){',
     '  if (!isFull() && full) { full=false; apply(); }',
     '});',
+    'function drawRef(){',
+    '  if (!REF || !REF.width) return;',
+    '  var k=Math.min(W/REF.width, H/REF.height);',
+    '  var dw=REF.width*k, dh=REF.height*k;',
+    '  ctx.globalAlpha=REF_OP; ctx.globalCompositeOperation=REF_BLEND;',
+    '  ctx.drawImage(REF,(W-dw)/2,(H-dh)/2,dw,dh);',
+    '  ctx.globalCompositeOperation="source-over"; ctx.globalAlpha=1;',
+    '}',
     'function render(){',
     '  ctx.globalCompositeOperation="source-over"; ctx.globalAlpha=1;',
     '  ctx.fillStyle="#ffffff"; ctx.fillRect(0,0,W,H);',
+    '  if (!REF_TOP) drawRef();',
     '  for (var i=0;i<layers.length;i++){ var l=layers[i]; if(!l.show) continue;',
     '    sheet.globalCompositeOperation="source-over"; sheet.globalAlpha=1;',
     '    sheet.clearRect(0,0,W,H);',
     '    if (l.ground.show){ sheet.globalAlpha=effOp(l.ground);',
     '      sheet.fillStyle=hsv(l.hue,100,BRI); sheet.fillRect(0,0,W,H); sheet.globalAlpha=1; }',
-    '    for (var j=0;j<l.wiggles.length;j++){ var w=l.wiggles[j]; if(!w.show) continue;',
-    '      var pts=viewPts(w);',
-    '      if (w.brush) brushStroke(pts,w,l.hue); else lineStroke(pts,w,l.hue); }',
+    '    var items=[];',
+    '    for (var j=0;j<l.wiggles.length;j++){ if(!l.wiggles[j].show) continue;',
+    '      items.push({ w:l.wiggles[j], pts:viewPts(l.wiggles[j]) }); }',
+    '    if (items.length>1) keepApart(items, SEP.gap, SEP.thin, SEP.thinnest);',
+    '    for (j=0;j<items.length;j++){',
+    '      if (items[j].w.brush) brushStroke(items[j].pts, items[j].w, l.hue, items[j].wid);',
+    '      else lineStroke(items[j].pts, items[j].w, l.hue, items[j].wid); }',
     '    ctx.globalCompositeOperation=l.blend; ctx.drawImage(sheetC,0,0,W,H); }',
     '  ctx.globalCompositeOperation="source-over";',
+    '  if (REF_TOP) drawRef();',
     '}',
+    'if (REF) REF.onload = function(){ fit(); render(); };',
     'var moves=layers.some(function(l){ if(!l.show) return false;',
     '  if (l.ground.show && l.ground.opDrift>0) return true;',
     '  return l.wiggles.some(function(w){',
@@ -1178,6 +1510,10 @@ function buildViewer(){
     '  !(window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches);',
     'function tick(){ t+=0.012; render(); raf=requestAnimationFrame(tick); }',
     'addEventListener("resize", function(){ fit(); render(); });',
+    'addEventListener("orientationchange", function(){',
+    '  setTimeout(function(){ fit(); render(); }, 150); });',
+    'if (window.visualViewport)',
+    '  visualViewport.addEventListener("resize", function(){ fit(); render(); });',
     'document.body.className="";',
     'fit(); render();',
     'if (moves) raf=requestAnimationFrame(tick);',
@@ -1195,6 +1531,7 @@ function exportPSD(){
 
   var oldW=W, oldH=H, oldR=R, oldSheet=sheet, oldSheetC=sheetC, oldBuf=buf, oldBufC=bufC;
   var sheets=[], i, j;
+  var haveRef = !!(refImg && refShow);
   try {
     W=pw; H=ph; R=Math.min(pw,ph);
     sheetC=document.createElement('canvas'); sheetC.width=pw; sheetC.height=ph;
@@ -1205,6 +1542,22 @@ function exportPSD(){
     var mergedC=document.createElement('canvas'); mergedC.width=pw; mergedC.height=ph;
     var merged=mergedC.getContext('2d');
     merged.fillStyle='#ffffff'; merged.fillRect(0,0,pw,ph);
+
+    /* layer 1 in the file is the reference, matching the panel numbering */
+    if (haveRef){
+      sheet.globalCompositeOperation='source-over';
+      sheet.globalAlpha=refOpacity;
+      sheet.clearRect(0,0,pw,ph);
+      var rk=Math.min(pw/refImg.width, ph/refImg.height);
+      var rw=refImg.width*rk, rh2=refImg.height*rk;
+      sheet.drawImage(refImg,(pw-rw)/2,(ph-rh2)/2,rw,rh2);
+      sheet.globalAlpha=1;
+      sheets.push({ name:'Layer 1 Reference', blend:refBlend, show:true,
+                    rgba:sheet.getImageData(0,0,pw,ph).data });
+      merged.globalCompositeOperation=refBlend;
+      merged.drawImage(sheetC,0,0);
+      merged.globalCompositeOperation='source-over';
+    }
 
     for (i=0;i<layers.length;i++){
       var l=layers[i];
@@ -1217,13 +1570,18 @@ function exportPSD(){
         sheet.fillRect(0,0,pw,ph);
         sheet.globalAlpha=1;
       }
+      var items=[];
       for (j=0;j<l.wiggles.length;j++){
-        var w=l.wiggles[j];
-        if (!w.show) continue;
-        var pts=viewPts(w);
-        if (w.brush) brushStroke(pts,w,l.hue); else lineStroke(pts,w,l.hue);
+        if (!l.wiggles[j].show) continue;
+        items.push({ w:l.wiggles[j], pts:viewPts(l.wiggles[j]) });
       }
-      sheets.push({ name:'Layer '+(i+1), blend:l.blend, show:vis(l),
+      if (items.length>1)
+        keepApart(items, sepGap * (R/Math.min(oldW,oldH)), sepThin, sepThinnest);
+      for (j=0;j<items.length;j++){
+        if (items[j].w.brush) brushStroke(items[j].pts, items[j].w, l.hue, items[j].wid);
+        else lineStroke(items[j].pts, items[j].w, l.hue, items[j].wid);
+      }
+      sheets.push({ name:'Layer '+(i+(haveRef?2:1)), blend:l.blend, show:vis(l),
                     rgba:sheet.getImageData(0,0,pw,ph).data });
       if (vis(l)){
         merged.globalCompositeOperation=l.blend;
@@ -1255,6 +1613,7 @@ function projectData(){
     format:'wiggle-layers', version:PROJECT_VERSION,
     title: el.titleValue || 'Wiggle',
     cmW:cmW, cmH:cmH, hueStep:hueStep, spread:spread, newBlend:newBlend,
+    sepGap:sepGap, sepThin:sepThin, sepThinnest:sepThinnest,
     layers: layers.map(function(l){
       return { hue:l.hue, blend:l.blend, mute:!!l.mute, solo:!!l.solo, open:l.open,
         ground:{ opacity:l.ground.opacity, opDrift:l.ground.opDrift||0,
@@ -1267,7 +1626,8 @@ function projectData(){
             wDrift:w.wDrift||0, wSpeed:w.wSpeed||1,
             drift:w.drift||0, speed:w.speed||1,
             brush:!!w.brush, load:w.load, swell:w.swell, bite:w.bite,
-            n:w.n, maxN:w.maxN, show:w.show, open:w.open,
+            n:w.n, maxN:w.maxN, grow:w.grow||'both', reach:w.reach||0.08,
+            seedLen:w.seedLen||3, show:w.show, open:w.open,
             base: w.base.map(function(p){ return [ +p.x.toFixed(5), +p.y.toFixed(5) ]; }),
             pts:  w.pts.map(function(p){  return [ +p.x.toFixed(5), +p.y.toFixed(5) ]; }) };
         }) };
@@ -1333,6 +1693,9 @@ function loadProject(text, quiet){
   hueStep = pick(d.hueStep, 24);
   spread = pick(d.spread, 0.35);
   newBlend = pick(d.newBlend, 'multiply');
+  sepGap = pick(d.sepGap, 6);
+  sepThin = pick(d.sepThin, true);
+  sepThinnest = pick(d.sepThinnest, 0.3);
   el.titleValue = pick(d.title, 'Wiggle');
 
   layers = d.layers.map(function(L){
@@ -1349,7 +1712,7 @@ function loadProject(text, quiet){
       var w = newWiggle(0);
       var keys = ['sat','w','wBase','tight','tx','ty','rot','scale',
                   'satDrift','satSpeed','wDrift','wSpeed','drift','speed',
-                  'load','swell','bite','n','maxN'];
+                  'load','swell','bite','n','maxN','grow','reach','seedLen'];
       keys.forEach(function(k){ if (Wg[k] !== undefined) w[k] = Wg[k]; });
       w.brush = !!Wg.brush;
       w.show  = pick(Wg.show, true);
