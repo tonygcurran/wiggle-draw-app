@@ -192,6 +192,7 @@ const DEFAULT = () => ({
   years: {},        // per-year records: { '2026': { f: {...} } } — foundations, reviews, budget
   habits: [],       // {id,name,hue}
   hlog: {},         // "2026-08-15": ["h1","h2"]
+  rlog: {},         // "2026-08-15": ["r1","r4"] — morning and evening rituals
   days: {},         // "2026-08-15": {note, tasks:[{t,d}]}
   weeks: {},        // "2026-W33": {focus,feel,grat[],goals[],todos[],notes,wins[],rate}
   months: {},       // "2026-08": {goals:[{t,focus[],notes}], am[], pm[], review:{}}
@@ -213,13 +214,35 @@ function load() {
   try {
     const raw = localStorage.getItem(KEY);
     if (!raw) return DEFAULT();
-    return migrate(Object.assign(DEFAULT(), JSON.parse(raw)));
+    const data = Object.assign(DEFAULT(), JSON.parse(raw));
+    try { return migrate(data); }
+    catch (e) { console.error('migration failed, keeping data as-is', e); return data; }
   } catch (e) { return DEFAULT(); }
 }
 /* v1 kept one year's prompts in S.f — move it into the per-year store */
 function migrate(st) {
   st.years = st.years || {};
   st.projects = st.projects || [];
+  st.rlog = st.rlog || {};
+  /* weekly goals were three plain lines; they are items now, like tasks */
+  Object.values(st.weeks || {}).forEach(w => {
+    w.goals = (w.goals || []).map(g => typeof g === 'string' ? { t: g, d: false } : g)
+      .filter(g => g && ((g.t || '').trim() || g.g || g.p));
+  });
+  Object.values(st.months || {}).forEach(m => {
+    (m.goals || []).forEach(g => {
+      if (!('g' in g)) g.g = '';
+      g.focus = (g.focus || []).map(f => typeof f === 'string' ? { t: f, d: false } : f)
+        .filter(f => f && ((f.t || '').trim() || f.g || f.p));
+    });
+    ['am', 'pm'].forEach(k => {
+      m[k] = (m[k] || []).map(x => typeof x === 'string' ? { id: uid(), t: x } : x)
+        .filter(x => x && ((x.t || '').trim()));
+    });
+    m.review = m.review || {};
+    m.review.byGoal = m.review.byGoal || {};
+    m.snap = m.snap || {};
+  });
   /* v2 allowed one parent; a goal can now serve several */
   (st.goals || []).forEach(g => {
     if (!g.parents) g.parents = g.parent ? [g.parent] : [];
@@ -269,7 +292,7 @@ function toast(msg) {
   t.textContent = msg; t.classList.add('show');
   clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 1300);
 }
-const uid = () => Math.random().toString(36).slice(2, 9);
+function uid() { return Math.random().toString(36).slice(2, 9); }
 
 /* ===================== dates ===================== */
 const pad = n => String(n).padStart(2, '0');
@@ -647,6 +670,48 @@ function toggleHabit(day, hid) {
   if (!arr.length) delete S.hlog[day];
   save();
 }
+/* rituals: the month names them, the day ticks them */
+function ritualsFor(dateIso) {
+  const d = parseIso(dateIso), M = (S.months || {})[monthKey(d.getFullYear(), d.getMonth())];
+  if (!M) return { am: [], pm: [] };
+  return { am: (M.am || []).filter(r => (r.t || '').trim()), pm: (M.pm || []).filter(r => (r.t || '').trim()) };
+}
+function ritualDone(dateIso, rid) { return ((S.rlog || {})[dateIso] || []).includes(rid); }
+function toggleRitual(dateIso, rid) {
+  S.rlog = S.rlog || {};
+  const arr = S.rlog[dateIso] = S.rlog[dateIso] || [];
+  const i = arr.indexOf(rid);
+  i < 0 ? arr.push(rid) : arr.splice(i, 1);
+  if (!arr.length) delete S.rlog[dateIso];
+  save();
+}
+function ritualRate(rid, y, m) {
+  const dim = new Date(y, m + 1, 0).getDate();
+  const today = new Date();
+  let days = 0, hit = 0;
+  for (let d = 1; d <= dim; d++) {
+    const dt = new Date(y, m, d);
+    if (dt > today) break;
+    days++;
+    if (ritualDone(iso(dt), rid)) hit++;
+  }
+  return { days, hit, pct: days ? Math.round(hit / days * 100) : 0 };
+}
+
+/* habits carrying a particular goal or project */
+function habitsForGoal(id) { return S.habits.filter(h => h.g === id || h.p === id); }
+function habitMonthRate(hid, y, m) {
+  const dim = new Date(y, m + 1, 0).getDate(), today = new Date();
+  let days = 0, hit = 0;
+  for (let d = 1; d <= dim; d++) {
+    const dt = new Date(y, m, d);
+    if (dt > today) break;
+    days++;
+    if (logged(iso(dt), hid)) hit++;
+  }
+  return { days, hit, pct: days ? Math.round(hit / days * 100) : 0 };
+}
+
 function streak(hid) {
   let n = 0, d = new Date();
   if (!logged(iso(d), hid)) d = addDays(d, -1);
@@ -1025,9 +1090,10 @@ function tasksForGoal(id) {
   Object.keys(S.days).sort().forEach(dk => (S.days[dk].tasks || []).forEach(t => {
     if (t.g === id) out.push({ where: dk, t });
   }));
-  Object.keys(S.weeks).sort().forEach(wk => (S.weeks[wk].todos || []).forEach(t => {
-    if (t.g === id) out.push({ where: wk.replace('-W', ' week '), t });
-  }));
+  Object.keys(S.weeks).sort().forEach(wk => {
+    (S.weeks[wk].todos || []).forEach(t => { if (t.g === id) out.push({ where: wk.replace('-W', ' week '), t }); });
+    (S.weeks[wk].goals || []).forEach(t => { if (t.g === id) out.push({ where: wk.replace('-W', ' week ') + ' \u00b7 weekly goal', t }); });
+  });
   return out;
 }
 
@@ -1044,6 +1110,7 @@ function weekEffort(y, w) {
   };
   for (let i = 0; i < 7; i++) ((S.days[iso(addDays(mon, i))] || {}).tasks || []).forEach(add);
   ((S.weeks[weekKey(y, w)] || {}).todos || []).forEach(add);
+  ((S.weeks[weekKey(y, w)] || {}).goals || []).forEach(add);
   return { tally, none };
 }
 
@@ -1157,9 +1224,58 @@ function noteControl(it, redraw) {
 }
 
 
+/* ===================== what a month actually touched ===================== */
+function activeInMonth(y, m) {
+  const ids = new Set();
+  const note = t => { if (t.g) ids.add('g:' + t.g); if (t.p) ids.add('p:' + t.p); };
+  const first = iso(new Date(y, m, 1)), last = iso(new Date(y, m + 1, 0));
+  Object.keys(S.days).forEach(dk => {
+    if (dk < first || dk > last) return;
+    (S.days[dk].tasks || []).forEach(note);
+  });
+  Object.keys(S.weeks).forEach(wk => {
+    const [wy, ww] = wk.split('-W').map(Number);
+    if (weekMonth(wy, ww) !== m || wy !== y) return;
+    (S.weeks[wk].todos || []).forEach(note);
+    (S.weeks[wk].goals || []).forEach(note);
+  });
+  const M = (S.months || {})[monthKey(y, m)];
+  if (M) (M.goals || []).forEach(g => { note(g); (g.focus || []).forEach(note); });
+  return Array.from(ids).map(k => {
+    const [kind, id] = [k.slice(0, 1), k.slice(2)];
+    if (kind === 'p') { const p = projectById(id); return p && { key: k, kind: 'project', id, obj: p, pct: projectProgress(p) }; }
+    const g = S.goals.find(x => x.id === id);
+    return g && { key: k, kind: 'goal', id, obj: g, pct: goalProgress(g) };
+  }).filter(Boolean);
+}
+
+/* things finished inside a month, for the review to draw on */
+function finishedInMonth(y, m) {
+  const out = [];
+  const first = iso(new Date(y, m, 1)), last = iso(new Date(y, m + 1, 0));
+  Object.keys(S.days).sort().forEach(dk => {
+    if (dk < first || dk > last) return;
+    (S.days[dk].tasks || []).forEach(t => { if (t.d && (t.t || '').trim()) out.push({ text: t.t, from: dk }); });
+  });
+  Object.keys(S.weeks).forEach(wk => {
+    const [wy, ww] = wk.split('-W').map(Number);
+    if (weekMonth(wy, ww) !== m || wy !== y) return;
+    (S.weeks[wk].goals || []).forEach(t => { if (t.d && (t.t || '').trim()) out.push({ text: t.t, from: 'weekly goal' }); });
+    (S.weeks[wk].wins || []).forEach(x => { if ((x || '').trim()) out.push({ text: x, from: 'week ' + ww + ' win' }); });
+  });
+  S.goals.forEach(g => (g.milestones || []).forEach(ms => {
+    if (ms.d && (ms.t || '').trim()) out.push({ text: ms.t, from: 'milestone \u00b7 ' + (g.title || 'goal') });
+  }));
+  S.projects.forEach(p => { if (p.done && p.done >= first && p.done <= last)
+    out.push({ text: p.title || 'Untitled project', from: 'project finished' }); });
+  const seen = new Set();
+  return out.filter(o => { const k = o.text.trim().toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; });
+}
+
+
 /* ===================== router ===================== */
 const now0 = new Date();
-let pullOpen = false, weekPullOpen = false;
+let pullOpen = false, weekPullOpen = false, weekGoalOpen = false, monthPickOpen = false;
 
 /* move or copy a pooled candidate into a week's list, depending on where it lives */
 function takeCandidate(c, W, wkKey) {
@@ -1347,6 +1463,32 @@ function viewToday() {
   }
   v.append(hc);
 
+  /* rituals */
+  const rit = ritualsFor(k);
+  if (rit.am.length || rit.pm.length) {
+    const rc = E('div', { cls: 'card' });
+    const totalR = rit.am.length + rit.pm.length;
+    const doneR = rit.am.concat(rit.pm).filter(r => ritualDone(k, r.id)).length;
+    rc.append(E('div', { cls: 'head' }, [E('h2', { text: 'Rituals' }),
+      E('span', { cls: 'pct', text: doneR + ' of ' + totalR })]));
+    [['am', 'Morning'], ['pm', 'Evening']].forEach(([which, label]) => {
+      if (!rit[which].length) return;
+      rc.append(E('h3', { style: 'margin:10px 0 2px', text: label }));
+      rit[which].forEach(r => {
+        const on = ritualDone(k, r.id);
+        rc.append(E('button', { style: 'display:flex;width:100%;gap:9px;align-items:center;padding:7px 0;text-align:left',
+          onclick: () => { toggleRitual(k, r.id); render(); } }, [
+          E('span', { cls: 'box' + (on ? ' on' : ''), style: 'flex:none;margin-top:0',
+            html: '<svg viewBox="0 0 12 12"><polyline points="1.5,6.5 4.5,9.5 10.5,2.5"/></svg>' }),
+          E('span', { style: 'flex:1;min-width:0;font-size:14.5px' + (on ? ';color:var(--faint)' : ''), text: r.t })
+        ]));
+      });
+    });
+    rc.append(E('button', { cls: 'btn ghost', style: 'margin-top:8px', text: 'Edit rituals',
+      onclick: () => { R.mo = parseIso(k).getMonth(); go('month'); } }));
+    v.append(rc);
+  }
+
   /* today's list */
   const tc = E('div', { cls: 'card' });
   tc.append(E('h2', { text: isNow ? "Today's list" : 'List for this day' }));
@@ -1451,7 +1593,19 @@ function viewToday() {
   wc.append(field('Weekly focus', bindArea(W, 'focus', 'The one thing this week is for.')));
   W.goals = W.goals || [];
   const wg = E('div');
-  for (let i = 0; i < 3; i++) wg.append(bindLine(W.goals, i, '', true));
+  if (!W.goals.length) wg.append(E('div', { cls: 'empty', text: 'None set. Open the week to name up to three.' }));
+  W.goals.forEach(gi => {
+    const owner = gi.p ? projectById(gi.p) : (gi.g ? S.goals.find(x => x.id === gi.g) : null);
+    wg.append(E('div', { cls: 'list-item' }, [
+      E('button', { cls: 'box' + (gi.d ? ' on' : ''), style: 'flex:none',
+        html: '<svg viewBox="0 0 12 12"><polyline points="1.5,6.5 4.5,9.5 10.5,2.5"/></svg>',
+        onclick: () => { gi.d = !gi.d; syncTaskToGoal(gi); save(true); render(); } }),
+      E('div', { cls: 'txt' }, [
+        E('div', { style: 'font-size:14.5px' + (gi.d ? ';color:var(--faint);text-decoration:line-through' : ''), text: gi.t || '\u2014' }),
+        owner ? E('div', { cls: 'pct', text: owner.title || '' }) : null
+      ])
+    ]));
+  });
   wc.append(field('Weekly goals', wg));
   if (W.todos.length) {
     const open = W.todos.filter(t => !t.d).length;
@@ -1531,8 +1685,29 @@ function viewWeek() {
 
   const c2 = E('div', { cls: 'card' });
   W.grat = W.grat || []; W.goals = W.goals || [];
-  const g2 = E('div'); for (let i = 0; i < 3; i++) g2.append(bindLine(W.goals, i, '', true));
-  c2.append(field('Weekly goals', g2));
+  c2.append(E('h2', { text: 'Weekly goals' }));
+  c2.append(E('p', { cls: 'lede', text: 'Three at most. Link each one to the goal or project it moves, and it counts as work toward it.' }));
+  c2.append(checkList(W.goals, 'Nothing set for this week.', render, { link: true, note: false }));
+  if (W.goals.length < 3) {
+    const cands = [].concat(
+      openProjects().map(p2 => ({ label: p2.title || 'Untitled project', sub: dueLabel(p2.due), p: p2.id, g: (p2.goals || [])[0] })),
+      S.goals.filter(g3 => !g3.completed).map(g3 => ({ label: g3.title || 'Untitled goal', sub: goalProgress(g3) + '%', g: g3.id })));
+    if (cands.length) {
+      c2.append(E('div', { cls: 'rule' }));
+      c2.append(E('button', { cls: 'btn ghost', style: 'padding-left:0',
+        text: (weekGoalOpen ? '\u2212' : '+') + ' Set one from a goal or project',
+        onclick: () => { weekGoalOpen = !weekGoalOpen; render(); } }));
+      if (weekGoalOpen) {
+        const list = E('div', { style: 'border-left:2px solid var(--rule);padding-left:11px;margin-top:6px' });
+        cands.forEach(c => list.append(E('button', { cls: 'menu-item', style: 'font-size:13px;padding:9px 0',
+          onclick: () => {
+            W.goals.push({ t: 'Move ' + c.label + ' forward', d: false, g: c.g || undefined, p: c.p || undefined });
+            weekGoalOpen = false; save(true); render();
+          }}, [c.label, E('span', { cls: 'pct', text: c.sub || '' })])));
+        c2.append(list);
+      }
+    }
+  }
   v.append(c2);
 
   /* gratitude gathered from the days */
@@ -1794,9 +1969,28 @@ function viewMonth() {
   M.goals.forEach((g, i) => {
     const blk = E('div', { style: i ? 'margin-top:18px;padding-top:14px;border-top:1px solid var(--rule)' : '' });
     blk.append(field('Goal ' + (i + 1), bindText(g, 't', 'What are you moving this month?')));
+    const msel = E('select', { style: 'width:100%;padding:7px 0;border:0;border-bottom:1px solid var(--rule);background:transparent',
+      onchange: e => { const val = e.target.value;
+        if (val.slice(0, 2) === 'p:') { g.p = val.slice(2); g.g = (projectById(g.p) || {}).goals && projectById(g.p).goals[0] || ''; }
+        else { g.g = val.slice(2); g.p = ''; }
+        save(); render(); } });
+    msel.append(E('option', { value: 'g:' }, 'Not linked'));
+    openProjects().forEach(p2 => {
+      const o = E('option', { value: 'p:' + p2.id }, 'Project \u00b7 ' + (p2.title || 'Untitled'));
+      if (g.p === p2.id) o.setAttribute('selected', 'selected');
+      msel.append(o);
+    });
+    S.goals.filter(x => !x.completed).forEach(x => {
+      const o = E('option', { value: 'g:' + x.id }, 'Goal \u00b7 ' + (x.title || 'Untitled'));
+      if (!g.p && g.g === x.id) o.setAttribute('selected', 'selected');
+      msel.append(o);
+    });
+    blk.append(field('Moves', msel));
+    const owner = g.p ? projectById(g.p) : (g.g ? S.goals.find(x => x.id === g.g) : null);
+    if (owner) blk.append(E('div', { cls: 'bar' }, E('i', { style: 'width:' +
+      (g.p ? projectProgress(owner) : goalProgress(owner)) + '%' })));
     g.focus = g.focus || [];
-    const fl = E('div'); for (let j = 0; j < 3; j++) fl.append(bindLine(g.focus, j, 'Focus ' + (j + 1), true));
-    blk.append(field('Focus', fl));
+    blk.append(field('Focus', checkList(g.focus, 'What are the three moves?', render, { link: true, note: false })));
     blk.append(field('Notes', bindArea(g, 'notes')));
     gc.append(blk);
   });
@@ -1805,18 +1999,121 @@ function viewMonth() {
   /* rituals */
   const rc = E('div', { cls: 'card' });
   rc.append(E('h2', { text: 'Rituals' }));
+  rc.append(E('p', { cls: 'lede', text: 'These appear on Today to be ticked off. The percentage is how often you have kept each one this month.' }));
   M.am = M.am || []; M.pm = M.pm || [];
-  const am = E('div'); for (let i = 0; i < 5; i++) am.append(bindLine(M.am, i, '', true));
-  rc.append(field('My morning rituals', am));
-  const pm = E('div'); for (let i = 0; i < 5; i++) pm.append(bindLine(M.pm, i, '', true));
-  rc.append(field('My evening rituals', pm));
+  [['am', 'Morning'], ['pm', 'Evening']].forEach(([which, label]) => {
+    const box = E('div');
+    M[which].forEach((r, i) => {
+      const rate = ritualRate(r.id, Y, m);
+      const line = E('div', { style: 'padding:7px 0;border-top:' + (i ? '1px solid var(--rule)' : '0') });
+      const inp = E('input', { type: 'text', placeholder: label + ' ritual',
+        oninput: e => { r.t = e.target.value; save(); } });
+      inp.value = r.t || '';
+      line.append(E('div', { style: 'display:flex;gap:9px;align-items:center' }, [
+        E('span', { cls: 'num', text: (i + 1) + '.' }),
+        E('div', { style: 'flex:1;min-width:0' }, inp),
+        E('span', { cls: 'pct', style: 'width:38px;text-align:right', text: rate.days ? rate.pct + '%' : '' }),
+        E('button', { cls: 'x', text: '\u00d7', onclick: () => { M[which].splice(i, 1); save(true); render(); } })
+      ]));
+      if (rate.days) line.append(E('div', { cls: 'bar', style: 'margin-left:19px' },
+        E('i', { style: 'width:' + rate.pct + '%' })));
+      box.append(line);
+    });
+    box.append(E('button', { cls: 'btn ghost', style: 'margin-top:8px', text: '+ Add',
+      onclick: () => { M[which].push({ id: uid(), t: '' }); save(true); render(); } }));
+    rc.append(field('My ' + label.toLowerCase() + ' rituals', box));
+  });
   v.append(rc);
 
+  /* habits, and what they are carrying */
+  if (habitsFor().length) {
+    const hc2 = E('div', { cls: 'card' });
+    hc2.append(E('div', { cls: 'head' }, [E('h2', { text: 'Habits this month' }),
+      E('button', { cls: 'btn ghost', text: 'Edit', onclick: () => go('more', 'habits') })]));
+    habitsFor().forEach(h => {
+      const rate = habitMonthRate(h.id, Y, m);
+      const owner = h.p ? projectById(h.p) : (h.g ? S.goals.find(x => x.id === h.g) : null);
+      hc2.append(E('div', { style: 'padding:10px 0;border-top:1px solid var(--rule)' }, [
+        E('div', { style: 'display:flex;gap:9px;align-items:baseline' }, [
+          E('span', { style: `width:9px;height:9px;border-radius:50%;flex:none;background:hsl(${h.hue},62%,50%)` }),
+          E('span', { style: 'flex:1;min-width:0;font-size:14.5px', text: h.name || 'Habit' }),
+          E('span', { cls: 'pct', text: rate.hit + '/' + rate.days + '  ' + rate.pct + '%' })
+        ]),
+        owner ? E('div', { cls: 'pct', style: 'padding-left:18px', text: 'carries ' + (owner.title || '') }) : null,
+        E('div', { cls: 'bar', style: 'margin-left:18px' },
+          E('i', { style: `width:${rate.pct}%;background:hsl(${h.hue},62%,48%)` }))
+      ]));
+    });
+    v.append(hc2);
+  }
+
   /* review */
+  M.review = M.review || {}; M.review.byGoal = M.review.byGoal || {}; M.snap = M.snap || {};
   const vc = E('div', { cls: 'card' });
   vc.append(E('h2', { text: MONTHS[m] + ' review' }));
   vc.append(E('p', { cls: 'lede', text: 'Fill this at the end of the month — it feeds the mid-year and yearly reviews.' }));
-  vc.append(renderFields(MONTH_REVIEW, M.review));
+
+  /* top three, drawn from what actually got finished */
+  M.review.top3 = M.review.top3 || [];
+  const fin = finishedInMonth(Y, m);
+  const t3 = E('div');
+  for (let j = 0; j < 3; j++) t3.append(bindLine(M.review.top3, j, '', true));
+  if (fin.length) {
+    t3.append(E('button', { cls: 'btn ghost', style: 'padding-left:0;margin-top:6px',
+      text: (monthPickOpen ? '\u2212' : '+') + ' From what you finished (' + fin.length + ')',
+      onclick: () => { monthPickOpen = !monthPickOpen; render(); } }));
+    if (monthPickOpen) {
+      const list = E('div', { style: 'border-left:2px solid var(--rule);padding-left:11px;margin-top:6px;max-height:280px;overflow-y:auto' });
+      fin.slice(0, 30).forEach(o => list.append(E('div', { cls: 'list-item' }, [
+        E('div', { cls: 'txt' }, [E('div', { style: 'font-size:14px', text: o.text }),
+          E('div', { cls: 'pct', text: o.from })]),
+        E('button', { cls: 'tag acc', text: 'Use', onclick: () => {
+          let slot = 2;
+          for (let n = 0; n < 3; n++) if (!((M.review.top3[n] || '').trim())) { slot = n; break; }
+          M.review.top3[slot] = o.text;
+          monthPickOpen = false; save(true); render();
+        }})
+      ])));
+      t3.append(list);
+    }
+  }
+  vc.append(field('Top three things I accomplished this month', t3));
+
+  /* goal by goal, with the movement made */
+  const active = activeInMonth(Y, m);
+  if (active.length) {
+    vc.append(E('div', { cls: 'rule' }));
+    vc.append(E('h3', { text: 'Goal by goal' }));
+    active.forEach(a => {
+      const was = M.snap[a.key];
+      const moved = was === undefined ? null : a.pct - was;
+      M.review.byGoal[a.key] = M.review.byGoal[a.key] || {};
+      const blk = E('div', { style: 'padding:12px 0;border-top:1px solid var(--rule)' });
+      blk.append(E('button', { style: 'display:flex;width:100%;justify-content:space-between;gap:10px;align-items:baseline;text-align:left',
+        onclick: () => a.kind === 'project' ? go('goals', 'project', a.id) : go('goals', null, a.id) }, [
+        E('span', { style: 'font-size:14.5px', text: a.obj.title || 'Untitled' }),
+        E('span', { cls: 'pct', text: a.pct + '%' + (moved === null ? '' : moved > 0 ? '  \u2191' + moved : moved < 0 ? '  \u2193' + Math.abs(moved) : '  \u2014') })
+      ]));
+      blk.append(E('div', { cls: 'bar' }, E('i', { style: 'width:' + a.pct + '%' })));
+      const carrying = habitsForGoal(a.id);
+      if (carrying.length) {
+        const line = carrying.map(h => (h.name || 'habit') + ' ' + habitMonthRate(h.id, Y, m).pct + '%').join(' \u00b7 ');
+        blk.append(E('div', { cls: 'pct', style: 'margin-top:6px', text: 'Habits: ' + line }));
+      }
+      blk.append(field('How it went', bindArea(M.review.byGoal[a.key], 'felt')));
+      blk.append(field('Next month', bindArea(M.review.byGoal[a.key], 'next')));
+      vc.append(blk);
+    });
+    vc.append(E('div', { cls: 'btnrow' }, [
+      E('button', { cls: 'btn', text: Object.keys(M.snap).length ? 'Update the mark' : 'Mark where they stand',
+        onclick: () => { active.forEach(a => M.snap[a.key] = a.pct); save(true); render(); } })
+    ]));
+    vc.append(E('p', { cls: 'lede', style: 'margin-top:8px',
+      text: 'Marking now lets next month show the movement rather than only the position.' }));
+  }
+
+  vc.append(E('div', { cls: 'rule' }));
+  vc.append(renderFields(MONTH_REVIEW.filter(f => f.k !== 'top3'), M.review));
   v.append(vc);
 
   /* weeks of this month */
@@ -2132,6 +2429,24 @@ function viewGoal(id) {
     v.append(pc2);
   }
 
+  /* the practice underneath it */
+  const carrying = habitsForGoal(g.id);
+  if (carrying.length) {
+    const hc3 = E('div', { cls: 'card' });
+    hc3.append(E('h2', { text: 'Habits carrying this' }));
+    carrying.forEach(h => hc3.append(E('div', { style: 'padding:10px 0;border-top:1px solid var(--rule)' }, [
+      E('div', { style: 'display:flex;gap:9px;align-items:baseline' }, [
+        E('span', { style: `width:9px;height:9px;border-radius:50%;flex:none;background:hsl(${h.hue},62%,50%)` }),
+        E('span', { style: 'flex:1;min-width:0;font-size:14.5px', text: h.name || 'Habit' }),
+        E('span', { cls: 'pct', text: streak(h.id) + 'd streak \u00b7 ' + habitRate(h.id, 30) + '%' })
+      ]),
+      E('div', { cls: 'bar', style: 'margin-left:18px' },
+        E('i', { style: `width:${habitRate(h.id, 30)}%;background:hsl(${h.hue},62%,48%)` }))
+    ])));
+    hc3.append(E('button', { cls: 'btn ghost', style: 'margin-top:10px', text: 'Edit habits', onclick: () => go('more', 'habits') }));
+    v.append(hc3);
+  }
+
   /* work logged against this goal */
   const linked = tasksForGoal(g.id);
   if (linked.length) {
@@ -2319,6 +2634,18 @@ function viewProject(id) {
     v.append(sc);
   }
 
+  const carryP = habitsForGoal(p.id);
+  if (carryP.length) {
+    const hc = E('div', { cls: 'card' });
+    hc.append(E('h2', { text: 'Habits carrying this' }));
+    carryP.forEach(h => hc.append(E('div', { cls: 'list-item' }, [
+      E('span', { style: `width:9px;height:9px;border-radius:50%;flex:none;margin-top:6px;background:hsl(${h.hue},62%,50%)` }),
+      E('span', { cls: 'txt', style: 'font-size:14.5px', text: h.name || 'Habit' }),
+      E('span', { cls: 'pct', text: habitRate(h.id, 30) + '%' })
+    ])));
+    v.append(hc);
+  }
+
   const fc = E('div', { cls: 'card' });
   if (!p.done) {
     fc.append(E('button', { cls: 'btn fill', text: 'Mark finished',
@@ -2430,7 +2757,7 @@ function pageFound() {
 function pageHabits() {
   const v = E('div');
   v.append(backBar('Habits'));
-  v.append(E('p', { cls: 'lede', text: 'One or two per goal. Small enough that a bad day cannot break them.' }));
+  v.append(E('p', { cls: 'lede', text: 'One or two per goal. Small enough that a bad day cannot break them \u2014 and linked to what they carry, so a goal can show the practice underneath it.' }));
   const c = E('div', { cls: 'card' });
   if (!S.habits.length) c.append(E('div', { cls: 'empty', text: 'No habits yet.' }));
   S.habits.forEach((h, i) => {
@@ -2442,7 +2769,8 @@ function pageHabits() {
       E('button', { cls: 'x', text: '×', onclick: () => { if (confirm('Remove this habit and its history?')) { S.habits.splice(i, 1); save(true); render(); } } })
     ]));
     row.append(E('div', { cls: 'pct', style: 'margin-top:6px;padding-left:32px',
-      text: streak(h.id) + ' day streak · ' + habitRate(h.id, 30) + '% of the last 30 days' }));
+      text: streak(h.id) + ' day streak \u00b7 ' + habitRate(h.id, 30) + '% of the last 30 days' }));
+    row.append(goalLink(h, render));
     c.append(row);
   });
   c.append(E('button', { cls: 'btn fill', style: 'margin-top:14px', text: '+ Add habit',
@@ -3313,7 +3641,9 @@ function toMarkdown() {
   out.push('\n## Habits\n');
   S.habits.forEach(h => {
     const days = Object.keys(S.hlog).filter(d => S.hlog[d].includes(h.id)).sort();
-    out.push('- **' + (h.name || 'Habit') + '** — ' + days.length + ' days logged, current streak ' + streak(h.id));
+    const owner = h.p ? projectById(h.p) : (h.g ? S.goals.find(x => x.id === h.g) : null);
+    out.push('- **' + (h.name || 'Habit') + '** — ' + days.length + ' days logged, current streak ' + streak(h.id) +
+      (owner ? '. Carries ' + (owner.title || 'a goal') + '.' : ''));
   });
 
   if ((S.projects || []).length) {
@@ -3468,7 +3798,10 @@ function exportYear(Y, out, put, putList) {
     out.push('\n#### Week ' + pad(w) + ' — ' + mon.getDate() + ' ' + MONTHS[mon.getMonth()] + '\n');
     if (W) {
       put('Focus', W.focus); put('How I wanted to feel', W.feel);
-      putList('Weekly goals', W.goals);
+      if ((W.goals || []).length) out.push('**Weekly goals**\n' + W.goals.map(g2 =>
+        '- [' + (g2.d ? 'x' : ' ') + '] ' + (g2.t || '') +
+        (g2.p && projectById(g2.p) ? ' _(' + (projectById(g2.p).title || 'project') + ')_'
+          : g2.g && goalTitle(g2.g) ? ' _(' + goalTitle(g2.g) + ')_' : '')).join('\n') + '\n');
       const wg = [];
       for (let i = 0; i < 7; i++) {
         const dk2 = iso(addDays(mon, i)), DD = S.days[dk2];
@@ -3493,9 +3826,36 @@ function exportYear(Y, out, put, putList) {
       M.goals.some(g => g.t) || (M.am || []).some(x => x) || (M.pm || []).some(x => x);
     if (!any) return;
     out.push('\n#### ' + mo + '\n');
-    M.goals.forEach((g, n) => { if (g.t) { put('Goal ' + (n + 1), g.t); putList('Focus', g.focus); put('Notes', g.notes); } });
-    putList('Morning rituals', M.am); putList('Evening rituals', M.pm);
+    M.goals.forEach((g, n) => { if (g.t) {
+      put('Goal ' + (n + 1), g.t + (g.p && projectById(g.p) ? ' (' + (projectById(g.p).title || 'project') + ')'
+        : g.g && goalTitle(g.g) ? ' (' + goalTitle(g.g) + ')' : ''));
+      const fx = (g.focus || []).filter(f => (f.t || '').trim());
+      if (fx.length) out.push('**Focus**\n' + fx.map(f => '- [' + (f.d ? 'x' : ' ') + '] ' + f.t +
+        (f.p && projectById(f.p) ? ' _(' + (projectById(f.p).title || 'project') + ')_'
+          : f.g && goalTitle(f.g) ? ' _(' + goalTitle(f.g) + ')_' : '')).join('\n') + '\n');
+      put('Notes', g.notes); } });
+    [['am', 'Morning rituals'], ['pm', 'Evening rituals']].forEach(([kk, label]) => {
+      const rows = (M[kk] || []).filter(r => (r.t || '').trim());
+      if (!rows.length) return;
+      out.push('**' + label + '**\n' + rows.map(r => {
+        const rate = ritualRate(r.id, Y, i);
+        return '- ' + r.t + (rate.days ? ' \u2014 kept ' + rate.hit + ' of ' + rate.days + ' days (' + rate.pct + '%)' : '');
+      }).join('\n') + '\n');
+    });
     MONTH_REVIEW.forEach(f => f.ty === 'list' ? putList(f.l, (M.review || {})[f.k]) : put(f.l, (M.review || {})[f.k]));
+    const bg = (M.review || {}).byGoal || {};
+    Object.keys(bg).forEach(k => {
+      const isP = k.slice(0, 1) === 'p', id = k.slice(2);
+      const obj = isP ? projectById(id) : S.goals.find(x => x.id === id);
+      if (!obj) return;
+      const pct = isP ? projectProgress(obj) : goalProgress(obj);
+      const was = (M.snap || {})[k];
+      if (!(bg[k].felt || '').trim() && !(bg[k].next || '').trim()) return;
+      out.push('**' + (obj.title || 'Untitled') + '** — ' + pct + '%' +
+        (was === undefined ? '' : ' (was ' + was + '%)'));
+      put('How it went', bg[k].felt);
+      put('Next month', bg[k].next);
+    });
   });
 
   out.push('\n### Mid-year review\n');
@@ -4712,6 +5072,7 @@ function mergeState(remote, local) {
   out.weeks = mergeKeyed(local.weeks, remote.weeks, rn);
   out.months = mergeKeyed(local.months, remote.months, rn);
   out.hlog = mergeKeyed(local.hlog, remote.hlog, rn);
+  out.rlog = mergeKeyed(local.rlog, remote.rlog, rn);
   out.limbs = { days: mergeKeyed((local.limbs || {}).days, (remote.limbs || {}).days, rn) };
 
   out.goals = mergeById(local.goals, remote.goals, rn);
