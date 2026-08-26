@@ -182,6 +182,7 @@ textarea::placeholder,input::placeholder{color:var(--faint)}
 <script>
 /* ===================== core ===================== */
 const KEY = 'goaldigger2026';
+/* BUILD_STAMP */ const BUILD = '2026-08-26.2054';
 const YEAR = 2026;                       /* the year this planner began */
 const CURRENT_YEAR = new Date().getFullYear();
 const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
@@ -1312,6 +1313,16 @@ function render() {
   else if (R.tab === 'studio') v = viewStudio();
   else v = viewMore();
   v.classList.add('view');
+  if (updateFound && !(R.tab === 'more' && R.page === 'data')) {
+    app.append(E('button', {
+      style: 'display:flex;width:100%;justify-content:space-between;align-items:center;gap:10px;' +
+             'background:var(--wash);border:1px solid var(--edge);border-radius:3px;padding:10px 12px;margin-bottom:12px;text-align:left',
+      onclick: () => go('more', 'data')
+    }, [
+      E('span', { cls: 'eyebrow', style: 'color:var(--acc)', text: 'A newer version is ready' }),
+      E('span', { cls: 'pct', style: 'color:var(--acc)', text: 'Update \u203a' })
+    ]));
+  }
   app.append(v);
   renderSpine(); renderTabs();
 }
@@ -3100,6 +3111,23 @@ function pageData() {
   oc.append(lf);
   oc.append(E('button', { cls: 'btn', style: 'margin-top:10px', text: 'Import from a file instead', onclick: () => lf.click() }));
   v.append(oc);
+
+  /* version */
+  const uc = E('div', { cls: updateFound ? 'card on' : 'card' });
+  uc.append(E('h2', { text: 'Version' }));
+  uc.append(E('div', { cls: 'pct', text: 'This copy: ' + BUILD }));
+  if (updateFound) {
+    uc.append(E('p', { cls: 'lede', style: 'margin-top:8px',
+      text: 'A newer build is on the server (' + updateFound + '). Updating reloads the page \u2014 nothing you have written is affected.' }));
+    uc.append(E('button', { cls: 'btn fill', style: 'margin-top:4px', text: 'Update now', onclick: applyUpdate }));
+  } else {
+    uc.append(E('div', { cls: 'btnrow' }, [
+      E('button', { cls: 'btn', text: 'Check for updates', onclick: () => checkForUpdate(true) })
+    ]));
+  }
+  uc.append(E('p', { cls: 'lede', style: 'margin-top:10px',
+    text: 'Home Screen apps hold on to their copy hard. If an update will not take, delete the icon, open the site in Safari, and add it again \u2014 your writing lives with the address, not the icon, so it survives.' }));
+  v.append(uc);
 
   const ic = E('div', { cls: 'card' });
   ic.append(E('h2', { text: 'Keep it on your phone' }));
@@ -5639,6 +5667,42 @@ const fmtBytes = b => b == null ? '—' : b < 1024 ? b + 'B'
   : b < 1073741824 ? (b / 1048576).toFixed(1) + 'M' : (b / 1073741824).toFixed(1) + 'G';
 
 
+/* ===================== is there a newer build? ===================== */
+let updateFound = null;
+
+function baseUrl() { return location.href.split('#')[0].split('?')[0]; }
+
+async function fetchBuild() {
+  const res = await fetch(baseUrl() + '?cb=' + Date.now(), { cache: 'no-store' });
+  if (!res.ok) throw new Error(res.status + '');
+  const text = await res.text();
+  const m = text.match(/\/\* BUILD_STAMP \*\/ const BUILD = '([^']+)'/);
+  if (!m) throw new Error('no build stamp on the server');
+  return m[1];
+}
+
+async function checkForUpdate(loud) {
+  try {
+    const remote = await fetchBuild();
+    if (remote === BUILD) { if (loud) toast('Already the latest'); return false; }
+    updateFound = remote;
+    if (loud) applyUpdate();
+    else render();
+    return true;
+  } catch (e) {
+    if (loud) toast('Could not check: ' + e.message);
+    return false;
+  }
+}
+
+function applyUpdate() {
+  /* a fresh query string forces iOS to fetch rather than serve its copy.
+     Same origin, so nothing stored is affected. */
+  save(true);
+  location.replace(baseUrl() + '?v=' + (updateFound || Date.now()));
+}
+
+
 /* ===================== boot ===================== */
 window.addEventListener('beforeunload', () => save(true));
 document.addEventListener('visibilitychange', () => {
@@ -5651,6 +5715,8 @@ if (navigator.storage && navigator.storage.persist) {
 }
 render();
 migrateMedia();
+/* quietly ask the server whether this copy is current */
+setTimeout(() => checkForUpdate(false), 1500);
 if (S.cfg.auto && S.cfg.token && S.cfg.gist) {
   cloudPull('merge').then(ok => { if (ok) render(); });
 }
