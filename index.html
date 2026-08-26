@@ -568,8 +568,43 @@ function renderFields(defs, store) {
 }
 
 /* checkable, growable list: array of {t,d} */
+let reordering = null;
+
+/* a compact mode for putting the list in the order you mean to do it */
+function reorderView(arr, redraw) {
+  const box = E('div');
+  box.append(E('div', { cls: 'head', style: 'margin-bottom:6px' }, [
+    E('h3', { style: 'margin:0', text: 'Drag order' }),
+    E('button', { cls: 'btn ghost', style: 'padding:0', text: 'Done',
+      onclick: () => { reordering = null; redraw(); } })
+  ]));
+  const move = (from, to) => {
+    if (to < 0 || to >= arr.length) return;
+    const [it] = arr.splice(from, 1);
+    arr.splice(to, 0, it);
+    save(true); redraw();
+  };
+  arr.forEach((it, i) => {
+    box.append(E('div', { style: 'display:flex;gap:7px;align-items:center;padding:7px 0;border-top:1px solid var(--rule)' }, [
+      E('span', { cls: 'num', style: 'padding-top:0', text: (i + 1) + '.' }),
+      E('span', { style: 'flex:1;min-width:0;font-size:14.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap' +
+        (it.d ? ';color:var(--faint);text-decoration:line-through' : ''), text: it.t || '\u2014' }),
+      i > 0 ? E('button', { cls: 'tag', style: 'padding:5px 8px', text: '\u2191', 'aria-label': 'Up',
+        onclick: () => move(i, i - 1) }) : E('span', { style: 'width:28px' }),
+      i < arr.length - 1 ? E('button', { cls: 'tag', style: 'padding:5px 8px', text: '\u2193', 'aria-label': 'Down',
+        onclick: () => move(i, i + 1) }) : E('span', { style: 'width:28px' }),
+      i > 0 ? E('button', { cls: 'tag acc', style: 'padding:5px 8px', text: 'top', 'aria-label': 'To the top',
+        onclick: () => move(i, 0) }) : E('span', { style: 'width:34px' })
+    ]));
+  });
+  box.append(E('p', { cls: 'lede', style: 'margin-top:10px',
+    text: 'First on the list is what you mean to do first. Ticked items keep their place until you clear them.' }));
+  return box;
+}
+
 function checkList(arr, ph, redraw, opts) {
   opts = opts || {};
+  if (reordering === arr) return reorderView(arr, redraw);
   const box = E('div');
   arr.forEach((it, i) => {
     const row = E('div');
@@ -590,8 +625,20 @@ function checkList(arr, ph, redraw, opts) {
     if (opts.move) row.append(moveControl(arr, i, opts.move, redraw));
     box.append(row);
   });
-  box.append(E('button', { cls: 'btn ghost', text: '+ Add', style: 'margin-top:8px',
+  const btns = E('div', { style: 'display:flex;gap:12px;align-items:center;margin-top:8px' });
+  btns.append(E('button', { cls: 'btn ghost', text: '+ Add', style: 'padding-left:0',
     onclick: () => { arr.push({ t: '', d: false }); save(); redraw(); } }));
+  if (arr.filter(x => (x.t || '').trim()).length > 1) {
+    btns.append(E('button', { cls: 'btn ghost', text: 'Reorder',
+      onclick: () => { reordering = arr; redraw(); } }));
+    if (arr.some(x => x.d)) btns.append(E('button', { cls: 'btn ghost', text: 'Clear ticked',
+      onclick: () => {
+        if (!confirm('Remove the ticked items from this list?')) return;
+        for (let i = arr.length - 1; i >= 0; i--) if (arr[i].d) arr.splice(i, 1);
+        save(true); redraw();
+      }}));
+  }
+  box.append(btns);
   if (!arr.length) box.insertBefore(E('div', { cls: 'empty', text: ph || 'Nothing here yet.' }), box.firstChild);
   return box;
 }
