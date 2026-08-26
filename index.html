@@ -621,6 +621,7 @@ function checkList(arr, ph, redraw, opts) {
         onclick: () => { arr.splice(i, 1); save(); redraw(); } })
     ]));
     if (opts.note !== false) row.append(noteControl(it, redraw));
+    if (opts.link) row.append(costControl(it, redraw));
     if (opts.link) row.append(goalLink(it, redraw));
     if (opts.move) row.append(moveControl(arr, i, opts.move, redraw));
     box.append(row);
@@ -1318,6 +1319,31 @@ function finishedInMonth(y, m) {
     out.push({ text: p.title || 'Untitled project', from: 'project finished' }); });
   const seen = new Set();
   return out.filter(o => { const k = o.text.trim().toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; });
+}
+
+
+/* ===================== what a task costs ===================== */
+let costingItem = null;
+
+function costControl(it, redraw) {
+  const wrap = E('div', { style: 'padding:0 0 6px 29px' });
+  const has = num(it.c);
+  if (!has && costingItem !== it) {
+    wrap.append(E('button', { cls: 'tag', style: 'border-style:dashed;color:var(--faint)', text: '+ cost',
+      onclick: () => { costingItem = it; redraw(); } }));
+    return wrap;
+  }
+  const inp = E('input', { type: 'text', inputmode: 'decimal', placeholder: '0',
+    style: 'font-size:14px;max-width:110px',
+    oninput: e => { it.c = e.target.value; save(); } });
+  inp.value = it.c || '';
+  inp.addEventListener('blur', () => { costingItem = null; redraw(); });
+  const owner = it.p ? projectById(it.p) : null;
+  wrap.append(E('div', { style: 'display:flex;gap:9px;align-items:center' }, [
+    E('span', { cls: 'eyebrow', text: 'Cost' }), inp,
+    owner ? E('span', { cls: 'pct', text: 'counts toward ' + (owner.title || 'the project') }) : null
+  ]));
+  return wrap;
 }
 
 
@@ -2487,6 +2513,24 @@ function viewGoal(id) {
     v.append(pc2);
   }
 
+  /* what it is costing */
+  const spentG = goalSpent(g.id);
+  const projsB = S.projects.filter(p2 => (p2.goals || []).includes(g.id));
+  const plannedG = projsB.reduce((a, p2) => a + num(p2.budget), 0);
+  if (spentG || plannedG) {
+    const mc = E('div', { cls: 'card' });
+    mc.append(E('div', { cls: 'head' }, [E('h2', { text: 'What it is costing' }),
+      E('button', { cls: 'btn ghost', text: 'Budget', onclick: () => go('more', 'budget') })]));
+    mc.append(E('div', { style: 'display:grid;grid-template-columns:1fr 1fr;gap:10px' }, [
+      E('div', { cls: 'stat' }, [E('b', { text: money(plannedG) }), E('span', { text: 'Planned' })]),
+      E('div', { cls: 'stat' }, [E('b', { text: money(spentG) }), E('span', { text: 'Committed' })])
+    ]));
+    if (plannedG) mc.append(E('div', { cls: 'bar', style: 'margin-top:10px' },
+      E('i', { style: 'width:' + Math.min(100, Math.round(spentG / plannedG * 100)) + '%' +
+        (spentG > plannedG ? ';background:#B23A3A' : '') })));
+    v.append(mc);
+  }
+
   /* the practice underneath it */
   const carrying = habitsForGoal(g.id);
   if (carrying.length) {
@@ -2564,7 +2608,7 @@ function viewGoal(id) {
    tasks. Day and week tasks can nest inside it. */
 
 const newProject = () => ({ id: uid(), title: '', due: '', goals: [], notes: '',
-  tasks: [], done: '', created: iso(new Date()) });
+  tasks: [], costs: [], budget: '', done: '', created: iso(new Date()) });
 
 const projectById = id => S.projects.find(p => p.id === id);
 const openProjects = () => S.projects.filter(p => !p.done);
@@ -2587,6 +2631,37 @@ function projectProgress(p) {
   if (!total) return p.done ? 100 : 0;
   return Math.round((own.filter(t => t.d).length + sched.filter(x => x.t.d).length) / total * 100);
 }
+/* money spent against a project: its own lines, plus costs carried on tasks */
+function taskCostsFor(pid) {
+  const out = [];
+  Object.keys(S.days).sort().forEach(dk => (S.days[dk].tasks || []).forEach(t => {
+    if (t.p === pid && num(t.c)) out.push({ t: t.t, v: num(t.c), where: dk });
+  }));
+  Object.keys(S.weeks).sort().forEach(wk => (S.weeks[wk].todos || []).forEach(t => {
+    if (t.p === pid && num(t.c)) out.push({ t: t.t, v: num(t.c), where: wk.replace('-W', ' week ') });
+  }));
+  (projectById(pid) || { tasks: [] }).tasks.forEach(t => {
+    if (num(t.c)) out.push({ t: t.t, v: num(t.c), where: 'planned' });
+  });
+  return out;
+}
+function projectSpent(p) {
+  return (p.costs || []).reduce((a, c) => a + num(c.v), 0) +
+    taskCostsFor(p.id).reduce((a, c) => a + c.v, 0);
+}
+/* everything committed toward a goal, through its projects and its own tasks */
+function goalSpent(gid) {
+  let total = S.projects.filter(p => (p.goals || []).includes(gid)).reduce((a, p) => a + projectSpent(p), 0);
+  const seen = new Set();
+  Object.keys(S.days).forEach(dk => (S.days[dk].tasks || []).forEach(t => {
+    if (t.g === gid && !t.p && num(t.c)) total += num(t.c);
+  }));
+  Object.keys(S.weeks).forEach(wk => (S.weeks[wk].todos || []).forEach(t => {
+    if (t.g === gid && !t.p && num(t.c)) total += num(t.c);
+  }));
+  return total;
+}
+
 function daysUntil(d) { return d ? Math.round((parseIso(d) - new Date()) / 86400000) : null; }
 function dueLabel(d) {
   const n = daysUntil(d);
@@ -2675,6 +2750,36 @@ function viewProject(id) {
   tc.append(checkList(p.tasks, 'Nothing planned yet.', render));
   v.append(tc);
 
+  const bud = E('div', { cls: 'card' });
+  const spent = projectSpent(p), planned = num(p.budget);
+  bud.append(E('div', { cls: 'head' }, [E('h2', { text: 'Budget' }),
+    planned ? E('span', { cls: 'pct', style: spent > planned ? 'color:#B23A3A' : '',
+      text: money(spent) + ' of ' + money(planned) }) : null]));
+  bud.append(field('Planned', bindText(p, 'budget', '0')));
+  if (planned) {
+    const pctB = Math.min(100, Math.round(spent / planned * 100));
+    bud.append(E('div', { cls: 'bar' }, E('i', { style: 'width:' + pctB + '%' +
+      (spent > planned ? ';background:#B23A3A' : '') })));
+    bud.append(E('div', { cls: 'pct', style: 'margin-top:6px',
+      text: spent > planned ? money(spent - planned) + ' over' : money(planned - spent) + ' left' }));
+  }
+  p.costs = p.costs || [];
+  bud.append(E('h3', { style: 'margin:14px 0 0', text: 'Costs' }));
+  if (!p.costs.length) bud.append(E('div', { cls: 'empty', text: 'Materials, freight, framing, fees.' }));
+  p.costs.forEach((c, i) => bud.append(moneyRow(p.costs, i, render)));
+  bud.append(E('button', { cls: 'btn ghost', style: 'margin-top:8px', text: '+ Add cost',
+    onclick: () => { p.costs.push({ id: uid(), n: '', v: '' }); save(); render(); } }));
+  const tc2 = taskCostsFor(p.id);
+  if (tc2.length) {
+    bud.append(E('h3', { style: 'margin:14px 0 0', text: 'From tasks' }));
+    tc2.forEach(c => bud.append(E('div', { cls: 'list-item' }, [
+      E('div', { cls: 'txt' }, [E('div', { style: 'font-size:14px', text: c.t || '\u2014' }),
+        E('div', { cls: 'pct', text: c.where })]),
+      E('span', { cls: 'pct', text: money(c.v) })
+    ])));
+  }
+  v.append(bud);
+
   const sched = tasksForProject(p.id);
   if (sched.length) {
     const sc = E('div', { cls: 'card' });
@@ -2730,7 +2835,8 @@ const MORE_PAGES = [
   ['habits', 'Habits', 'Add, colour and retire the habits you track'],
   ['year', 'Year at a glance', 'Fifty-two weeks as one image'],
   ['reviews', 'Reviews', 'Mid-year reset and the yearly review'],
-  ['budget', 'Budget', 'Earn, invest, save, spend'],
+  ['budget', 'Budget', 'What comes in, what goes out, what the projects cost'],
+  ['wealth', 'Wealth', 'Assets, liabilities and the direction of travel'],
   ['lists', 'MiLists', 'Any list you want to keep'],
   ['sources', 'Sources', 'Articles, videos and papers, loose or attached'],
   ['notes', 'Notes', 'Loose pages'],
@@ -2747,6 +2853,7 @@ function viewMore() {
   if (R.page === 'year') return pageYear();
   if (R.page === 'reviews') return pageReviews();
   if (R.page === 'budget') return pageBudget();
+  if (R.page === 'wealth') return pageWealth();
   if (R.page === 'lists') return pageLists();
   if (R.page === 'notes') return pageNotes();
   if (R.page === 'sources') return pageSources();
@@ -2941,8 +3048,9 @@ function pageBudget() {
   const v = E('div');
   v.append(backBar('Budget'));
   v.append(E('div', { style: 'margin:-6px 0 12px' }, yearPicker()));
-  v.append(E('p', { cls: 'lede', text: 'What comes in and goes out each month, what you own and owe, and the four buckets \u2014 earn, invest, save, spend.' }));
-  financeSections(v);
+  v.append(E('p', { cls: 'lede', text: 'What comes in and goes out each month, what the projects are costing, and the year\u2019s intentions \u2014 earn, invest, save, spend.' }));
+  budgetSections(v);
+  projectBudgetCard(v);
   YF().sav = YF().sav || {};
   v.append(E('h2', { style: 'margin:22px 0 10px', text: 'The year ahead' }));
   BUDGET.forEach(sec => {
@@ -3489,6 +3597,16 @@ function pageLoose() {
 }
 
 
+/* ---------- wealth ---------- */
+function pageWealth() {
+  const v = E('div');
+  v.append(backBar('Wealth'));
+  v.append(E('p', { cls: 'lede', text: 'Not the month, the position: what you own, what you owe, and which way it is moving. Worth marking once a month and otherwise leaving alone.' }));
+  wealthSections(v);
+  return v;
+}
+
+
 /* ===================== balance sheet and cashflow ===================== */
 /* Assets, liabilities and recurring flows carry across years, so they live
    outside the per-year budget prompts. */
@@ -3538,7 +3656,7 @@ function moneyRow(arr, i, redraw, withFreq) {
   return row;
 }
 
-function financeSections(v) {
+function budgetSections(v) {
   const F = finance();
 
   /* ---- what comes in and goes out ---- */
@@ -3579,7 +3697,52 @@ function financeSections(v) {
   });
   v.append(fc);
 
-  /* ---- what you own and owe ---- */
+}
+
+/* the balance sheet in the export */
+function financeMarkdown(out, put) {
+  const F = finance();
+  if (!F.flows.length && !F.assets.length && !F.liabs.length &&
+      !S.projects.some(p => num(p.budget) || projectSpent(p))) return;
+  out.push('\n## Money\n');
+  const liveP = S.projects.filter(p => num(p.budget) || projectSpent(p));
+  if (liveP.length) {
+    out.push('**Project budgets**');
+    liveP.forEach(p => out.push('- ' + (p.title || 'Untitled project') + ' — ' +
+      money(projectSpent(p)) + (num(p.budget) ? ' of ' + money(num(p.budget)) : ' committed') +
+      ((p.goals || []).length ? '. Serves ' + p.goals.map(id => (S.goals.find(g => g.id === id) || {}).title || 'a goal').join(', ') : '')));
+    out.push('');
+  }
+  const inM = monthlyOf(F.flows, 'in'), outM = monthlyOf(F.flows, 'out');
+  if (F.flows.length) {
+    out.push('**Every month**  \nIn ' + money(inM) + ', out ' + money(outM) +
+      ', leaving ' + money(inM - outM) + '.\n');
+    ['in', 'out'].forEach(k => {
+      const rows = F.flows.filter(x => x.k === k && (x.n || x.v));
+      if (!rows.length) return;
+      out.push('**' + (k === 'in' ? 'Coming in' : 'Going out') + '**');
+      rows.forEach(x => out.push('- ' + (x.n || 'Unnamed') + ' — ' + money(num(x.v)) + ' ' + freqName(x.f)));
+      out.push('');
+    });
+  }
+  if (F.assets.length || F.liabs.length) {
+    out.push('**Balance sheet**  \nAssets ' + money(sumOf(F.assets)) + ', liabilities ' +
+      money(sumOf(F.liabs)) + ', net ' + money(sumOf(F.assets) - sumOf(F.liabs)) + '.\n');
+    [['assets', 'Assets'], ['liabs', 'Liabilities']].forEach(([k, label]) => {
+      if (!F[k].length) return;
+      out.push('**' + label + '**');
+      F[k].forEach(x => out.push('- ' + (x.n || 'Unnamed') + ' — ' + money(num(x.v))));
+      out.push('');
+    });
+  }
+  if (F.snaps.length > 1) {
+    out.push('**Net position over time**');
+    F.snaps.forEach(s => out.push('- ' + s.ym + ': ' + money(s.net)));
+    out.push('');
+  }
+}
+function wealthSections(v) {
+  const F = finance();
   const A = sumOf(F.assets), L = sumOf(F.liabs), net = A - L;
   const bc = E('div', { cls: 'card' });
   bc.append(E('h2', { text: 'What you own and owe' }));
@@ -3646,39 +3809,51 @@ function financeSections(v) {
   v.append(bc);
 }
 
-/* the balance sheet in the export */
-function financeMarkdown(out, put) {
-  const F = finance();
-  if (!F.flows.length && !F.assets.length && !F.liabs.length) return;
-  out.push('\n## Money\n');
-  const inM = monthlyOf(F.flows, 'in'), outM = monthlyOf(F.flows, 'out');
-  if (F.flows.length) {
-    out.push('**Every month**  \nIn ' + money(inM) + ', out ' + money(outM) +
-      ', leaving ' + money(inM - outM) + '.\n');
-    ['in', 'out'].forEach(k => {
-      const rows = F.flows.filter(x => x.k === k && (x.n || x.v));
-      if (!rows.length) return;
-      out.push('**' + (k === 'in' ? 'Coming in' : 'Going out') + '**');
-      rows.forEach(x => out.push('- ' + (x.n || 'Unnamed') + ' — ' + money(num(x.v)) + ' ' + freqName(x.f)));
-      out.push('');
-    });
+
+/* what the projects are costing */
+function projectBudgetCard(v) {
+  const live = S.projects.filter(p => !p.done || projectSpent(p));
+  const pc = E('div', { cls: 'card' });
+  pc.append(E('div', { cls: 'head' }, [E('h2', { text: 'Project budgets' }),
+    E('button', { cls: 'btn ghost', text: 'Projects', onclick: () => go('goals') })]));
+  if (!live.length) {
+    pc.append(E('div', { cls: 'empty', text: 'No projects with money attached yet. Open a project and set what it is meant to cost.' }));
+    v.append(pc);
+    return;
   }
-  if (F.assets.length || F.liabs.length) {
-    out.push('**Balance sheet**  \nAssets ' + money(sumOf(F.assets)) + ', liabilities ' +
-      money(sumOf(F.liabs)) + ', net ' + money(sumOf(F.assets) - sumOf(F.liabs)) + '.\n');
-    [['assets', 'Assets'], ['liabs', 'Liabilities']].forEach(([k, label]) => {
-      if (!F[k].length) return;
-      out.push('**' + label + '**');
-      F[k].forEach(x => out.push('- ' + (x.n || 'Unnamed') + ' — ' + money(num(x.v))));
-      out.push('');
-    });
-  }
-  if (F.snaps.length > 1) {
-    out.push('**Net position over time**');
-    F.snaps.forEach(s => out.push('- ' + s.ym + ': ' + money(s.net)));
-    out.push('');
-  }
+  let planned = 0, spent = 0;
+  live.forEach(p => { planned += num(p.budget); spent += projectSpent(p); });
+  pc.append(E('div', { style: 'display:grid;grid-template-columns:repeat(3,1fr);gap:10px' }, [
+    E('div', { cls: 'stat' }, [E('b', { text: money(planned) }), E('span', { text: 'Planned' })]),
+    E('div', { cls: 'stat' }, [E('b', { text: money(spent) }), E('span', { text: 'Committed' })]),
+    E('div', { cls: 'stat' }, [E('b', { style: 'color:' + (spent > planned && planned ? '#B23A3A' : 'var(--acc)'),
+      text: money(planned - spent) }), E('span', { text: 'Left' })])
+  ]));
+  live.forEach(p => {
+    const sp = projectSpent(p), pl = num(p.budget);
+    const over = pl && sp > pl;
+    pc.append(E('button', { style: 'display:block;width:100%;text-align:left;padding:11px 0;border-top:1px solid var(--rule)',
+      onclick: () => go('goals', 'project', p.id) }, [
+      E('div', { style: 'display:flex;justify-content:space-between;gap:10px;align-items:baseline' }, [
+        E('span', { style: 'font-size:14.5px', text: p.title || 'Untitled project' }),
+        E('span', { cls: 'pct', style: over ? 'color:#B23A3A' : '',
+          text: money(sp) + (pl ? ' of ' + money(pl) : '') })
+      ]),
+      E('div', { cls: 'pct', text: [
+        (p.goals || []).length ? 'serves ' + p.goals.map(id => (S.goals.find(g => g.id === id) || {}).title || 'a goal').join(', ') : '',
+        p.done ? 'finished' : dueLabel(p.due)
+      ].filter(Boolean).join(' \u00b7 ') }),
+      pl ? E('div', { cls: 'bar' }, E('i', { style: 'width:' + Math.min(100, Math.round(sp / pl * 100)) + '%' +
+        (over ? ';background:#B23A3A' : '') })) : null
+    ]));
+  });
+  const committed = live.reduce((a, p) => a + projectSpent(p), 0);
+  const monthlyOut = monthlyOf(F0().flows, 'out');
+  if (committed && monthlyOut) pc.append(E('p', { cls: 'lede', style: 'margin-top:10px',
+    text: 'Project costs sit outside the monthly figures above \u2014 they are one-off commitments, not standing expenses.' }));
+  v.append(pc);
 }
+const F0 = () => finance();
 
 
 /* ===================== markdown export ===================== */
