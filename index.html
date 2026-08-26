@@ -1086,13 +1086,15 @@ function goalLink(item, redraw) {
   const wrap = E('div', { style: 'padding:0 0 6px 29px;display:flex;gap:6px;flex-wrap:wrap;align-items:center' });
   const g = item.g ? S.goals.find(x => x.id === item.g) : null;
   const p = item.p ? projectById(item.p) : null;
+  const ms = g && item.ms ? (g.milestones || []).find(x => x.id === item.ms) : null;
 
   if (p) wrap.append(E('button', { cls: 'tag acc', text: p.title || 'Untitled project',
     onclick: () => { linkingItem = linkingItem === item ? null : item; redraw(); } }));
-  if (g) wrap.append(E('button', { cls: 'tag acc', text: g.title || 'Untitled goal',
+  if (g) wrap.append(E('button', { cls: 'tag acc',
+    text: ms ? (ms.t || 'Milestone') + ' \u00b7 ' + (g.title || 'goal') : (g.title || 'Untitled goal'),
     onclick: () => { linkingItem = linkingItem === item ? null : item; redraw(); } }));
   if (!p && !g) wrap.append(E('button', { cls: 'tag', style: 'border-style:dashed;color:var(--faint)',
-    text: '+ project or goal',
+    text: '+ project, goal or milestone',
     onclick: () => { linkingItem = linkingItem === item ? null : item; redraw(); } }));
   if (g && item.ga) wrap.append(E('span', { cls: 'pct', text: 'ticks the goal too' }));
 
@@ -1119,11 +1121,31 @@ function goalLink(item, redraw) {
     goals.forEach(gg => panel.append(E('button', {
       cls: 'menu-item', style: 'font-size:13px;padding:9px 0',
       onclick: () => {
-        if (item.g === gg.id) { delete item.g; delete item.ga; }
-        else item.g = gg.id;
+        if (item.g === gg.id && !item.ms) { delete item.g; delete item.ga; }
+        else { item.g = gg.id; delete item.ms; }
         linkingItem = null; save(true); redraw();
       }}, [gg.title || 'Untitled goal',
-          E('span', { cls: 'pct', text: item.g === gg.id ? 'linked' : goalProgress(gg) + '%' })])));
+          E('span', { cls: 'pct', text: item.g === gg.id && !item.ms ? 'linked' : goalProgress(gg) + '%' })])));
+
+    const stones = [];
+    goals.forEach(gg => (gg.milestones || []).forEach(ms => {
+      if (!(ms.t || '').trim()) return;
+      if (!ms.id) ms.id = uid();
+      stones.push({ g: gg, ms });
+    }));
+    if (stones.length) {
+      panel.append(E('h3', { style: 'margin:12px 0 0', text: 'Milestones' }));
+      stones.forEach(({ g: gg, ms }) => panel.append(E('button', {
+        cls: 'menu-item', style: 'font-size:13px;padding:9px 0',
+        onclick: () => {
+          if (item.ms === ms.id) { delete item.ms; delete item.g; }
+          else { item.ms = ms.id; item.g = gg.id; }
+          linkingItem = null; save(true); redraw();
+        }}, [
+        E('span', {}, [ms.t, E('small', { text: gg.title || 'Untitled goal' })]),
+        E('span', { cls: 'pct', text: item.ms === ms.id ? 'linked' : (ms.d ? 'reached' : '') })
+      ])));
+    }
 
     panel.append(E('button', { cls: 'menu-item', style: 'font-size:12px;color:var(--mut);padding:9px 0',
       onclick: () => { delete item.g; delete item.ga; delete item.p; linkingItem = null; save(true); redraw(); } },
@@ -1400,6 +1422,7 @@ function tagRow(obj, redraw, opts) {
   });
   chips.append(inp);
   wrap.append(chips);
+  if (opts.link !== false) wrap.append(goalLink(obj, redraw));
   if (opts.cite) {
     wrap.append(E('div', { style: 'display:flex;gap:10px;align-items:center;margin-top:8px' }, [
       E('button', { cls: 'box' + (obj.key ? ' on' : ''), style: 'flex:none;margin-top:0',
@@ -1410,6 +1433,21 @@ function tagRow(obj, redraw, opts) {
     if (obj.key) wrap.append(bindArea(obj, 'pull', 'Passage to quote \u2014 blank uses the note itself'));
   }
   return wrap;
+}
+
+
+/* notes, journal entries and sessions pointing at a goal or one of its milestones */
+function writingAbout(goalId, msId) {
+  const hit = o => o && o.g === goalId && (!msId || o.ms === msId) && (msId || !o.ms || true);
+  const out = [];
+  (S.notes || []).forEach(n => { if (hit(n) && (!msId || n.ms === msId))
+    out.push({ label: n.title || 'Untitled note', body: n.body || '', where: 'note', open: () => go('more', 'notes') }); });
+  journalEntries().forEach(j => { if (hit(j.obj) && (!msId || j.obj.ms === msId))
+    out.push({ label: j.label, body: j.body || '', where: j.kind, open: j.open }); });
+  S.studio.entries.forEach(e => { if (!e.draft && e.goal === goalId)
+    out.push({ label: e.title || 'Untitled session', body: e.claim || e.inAction || '', where: 'studio',
+      open: () => { studioView = 'list'; openEntry = e.id; go('studio'); } }); });
+  return out;
 }
 
 
@@ -2513,6 +2551,10 @@ function viewGoal(id) {
       E('span', { cls: 'eyebrow', text: 'By' }),
       E('div', { style: 'flex:1' }, bindText(m, 'due', '', 'date'))
     ]));
+    const msWritten = m.id ? writingAbout(g.id, m.id) : [];
+    if (msWritten.length) blk.append(E('div', { cls: 'pct', style: 'padding-left:29px',
+      text: msWritten.length + ' note' + (msWritten.length === 1 ? '' : 's') + ' against this \u00b7 ' +
+        msWritten.slice(0, 2).map(w3 => w3.label).join(', ') }));
     if (long) {
       m.kt = m.kt || [];
       const kb = E('div', { style: 'padding-left:29px' });
@@ -2586,6 +2628,26 @@ function viewGoal(id) {
       E('div', { cls: 'pct', text: p.done ? 'finished ' + p.done : dueLabel(p.due) })
     ])));
     v.append(pc2);
+  }
+
+  /* what has been written about it */
+  const written = writingAbout(g.id);
+  if (written.length) {
+    const wc2 = E('div', { cls: 'card' });
+    wc2.append(E('div', { cls: 'head' }, [E('h2', { text: 'Written about this' }),
+      E('span', { cls: 'pct', text: written.length })]));
+    written.slice(0, 12).forEach(w2 => wc2.append(E('button', {
+      style: 'display:block;width:100%;text-align:left;padding:10px 0;border-top:1px solid var(--rule)',
+      onclick: w2.open }, [
+      E('div', { style: 'display:flex;justify-content:space-between;gap:10px' }, [
+        E('span', { style: 'font-size:14.5px', text: w2.label }),
+        E('span', { cls: 'pct', text: w2.where })
+      ]),
+      (w2.body || '').trim() ? E('div', { cls: 'pct', style: 'margin-top:2px',
+        text: w2.body.trim().replace(/\n+/g, ' ').slice(0, 80) }) : null
+    ])));
+    if (written.length > 12) wc2.append(E('div', { cls: 'pct', style: 'margin-top:8px', text: 'showing the most recent 12' }));
+    v.append(wc2);
   }
 
   /* what it is costing */
@@ -3242,31 +3304,7 @@ function pageNotes() {
     ]));
     n.links = n.links || [];
     c.append(areaWithLinks(n, 'body', 'Write…', 1, n.links));
-    n.themes = n.themes || [];
-    const tagIn = E('input', { type: 'text', placeholder: 'Tags, comma-separated',
-      oninput: e => { n.themes = parseThemes(e.target.value); save(); } });
-    tagIn.value = n.themes.join(', ');
-    tagIn.addEventListener('blur', () => render());
-    c.append(field('Threads', tagIn));
-    if (vocab.length) {
-      const sug = E('div', { cls: 'chips', style: 'margin-top:-6px' });
-      vocab.slice(0, 10).forEach(t => {
-        if (n.themes.some(x => sameTheme(x, t.label))) return;
-        sug.append(E('button', { cls: 'chip', style: 'font-size:11.5px;padding:4px 9px;border-style:dashed',
-          text: '+ ' + t.label, onclick: () => { n.themes.push(t.label); save(true); render(); } }));
-      });
-      if (sug.children.length) c.append(sug);
-    }
-    c.append(E('div', { style: 'display:flex;gap:11px;align-items:flex-start;margin-top:10px' }, [
-      E('button', { cls: 'box' + (n.key ? ' on' : ''), style: 'flex:none',
-        html: '<svg viewBox="0 0 12 12"><polyline points="1.5,6.5 4.5,9.5 10.5,2.5"/></svg>',
-        onclick: () => { n.key = !n.key; save(true); render(); } }),
-      E('div', { style: 'flex:1' }, [
-        E('div', { style: 'font-size:14.5px', text: 'Cite this' }),
-        E('p', { cls: 'lede', style: 'margin:2px 0 0', text: 'Makes it available as evidence for a finding, alongside studio sessions.' })
-      ])
-    ]));
-    if (n.key) c.append(field('Passage to quote', bindArea(n, 'pull', 'Leave blank and the note itself is used.', 1)));
+    c.append(tagRow(n, render, { cite: true }));
     c.append(E('div', { cls: 'rule' }));
     c.append(linkList(n.links, render, { empty: 'No links on this note.' }));
     v.append(c);
@@ -4064,7 +4102,15 @@ function toMarkdown() {
 
   if (S.notes.length) {
     out.push('\n## Notes\n');
-    S.notes.forEach(n => { out.push('\n### ' + (n.title || 'Note') + '\n'); out.push((n.body || '').trim() + '\n'); });
+    S.notes.forEach(n => {
+      const ng = n.g && S.goals.find(x => x.id === n.g);
+      const nms = ng && n.ms && (ng.milestones || []).find(x => x.id === n.ms);
+      out.push('\n### ' + (n.title || 'Note') +
+        (ng ? ' \u2014 ' + (nms ? (nms.t || 'milestone') + ', ' : '') + (ng.title || 'a goal') : '') + '\n');
+      out.push((n.body || '').trim() + '\n');
+      if ((n.themes || []).length) out.push('Threads: ' + n.themes.join(', ') + '\n');
+      (n.links || []).forEach(l => out.push('- ' + (l.url ? '[' + (l.label || l.url) + '](' + l.url + ')' : l.label)));
+    });
   }
   return out.join('\n');
 }
