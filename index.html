@@ -1347,6 +1347,72 @@ function costControl(it, redraw) {
 }
 
 
+/* ===================== everything you have written ===================== */
+/* Day, week and month notes are journal entries. They keep living where they
+   were written, but the Notes tab can see them, tag them, and cite them. */
+
+function journalEntries() {
+  const out = [];
+  Object.keys(S.days).forEach(dk => {
+    const d = S.days[dk];
+    if (!(d.note || '').trim() && !(d.themes || []).length) return;
+    out.push({ id: 'day:' + dk, kind: 'day', date: dk, obj: d, body: d.note || '',
+      label: DOW[(parseIso(dk).getDay() + 6) % 7] + ' ' + dk,
+      open: () => { R.day = dk; go('today'); } });
+  });
+  Object.keys(S.weeks).forEach(wk => {
+    const w = S.weeks[wk];
+    if (!(w.notes || '').trim() && !(w.themes || []).length) return;
+    const [y, ww] = wk.split('-W').map(Number);
+    out.push({ id: 'week:' + wk, kind: 'week', date: iso(mondayOf(y, ww)), obj: w, body: w.notes || '',
+      label: 'Week ' + pad(ww) + ', ' + y,
+      open: () => { R.wk = { y, w: ww }; go('week'); } });
+  });
+  Object.keys(S.months || {}).forEach(mk => {
+    const m = S.months[mk];
+    if (!(m.note || '').trim() && !(m.themes || []).length) return;
+    const [y, mm] = mk.split('-').map(Number);
+    out.push({ id: 'month:' + mk, kind: 'month', date: iso(new Date(y, mm - 1, 1)), obj: m, body: m.note || '',
+      label: MONTHS[mm - 1] + ' ' + y,
+      open: () => { R.year = y; R.mo = mm - 1; go('month'); } });
+  });
+  return out.sort((a, b) => a.date < b.date ? 1 : -1);
+}
+const journalById = id => journalEntries().find(j => j.id === id);
+
+/* the tag row shared by notes, days, weeks and months */
+function tagRow(obj, redraw, opts) {
+  opts = opts || {};
+  obj.themes = obj.themes || [];
+  const wrap = E('div', { style: 'margin-top:8px' });
+  const chips = E('div', { cls: 'chips' });
+  obj.themes.forEach((t, i) => chips.append(E('button', { cls: 'chip', style: 'font-size:12px;padding:5px 10px',
+    onclick: () => { obj.themes.splice(i, 1); save(true); redraw(); } }, [t, E('span', { style: 'opacity:.5', text: '\u00d7' })])));
+  const vocab = allThemeCounts().filter(t => !obj.themes.some(x => sameTheme(x, t.label))).slice(0, 6);
+  vocab.forEach(t => chips.append(E('button', { cls: 'chip', style: 'font-size:11.5px;padding:4px 9px;border-style:dashed;color:var(--mut)',
+    text: '+ ' + t.label, onclick: () => { obj.themes.push(t.label); save(true); redraw(); } })));
+  const inp = E('input', { type: 'text', placeholder: 'New thread', style: 'font-size:13px;max-width:150px' });
+  inp.addEventListener('blur', () => {
+    const v2 = inp.value.trim();
+    if (!v2) return;
+    if (!obj.themes.some(x => sameTheme(x, v2))) obj.themes.push(v2);
+    inp.value = ''; save(true); redraw();
+  });
+  chips.append(inp);
+  wrap.append(chips);
+  if (opts.cite) {
+    wrap.append(E('div', { style: 'display:flex;gap:10px;align-items:center;margin-top:8px' }, [
+      E('button', { cls: 'box' + (obj.key ? ' on' : ''), style: 'flex:none;margin-top:0',
+        html: '<svg viewBox="0 0 12 12"><polyline points="1.5,6.5 4.5,9.5 10.5,2.5"/></svg>',
+        onclick: () => { obj.key = !obj.key; save(true); redraw(); } }),
+      E('span', { cls: 'pct', text: 'Cite this as evidence' })
+    ]));
+    if (obj.key) wrap.append(bindArea(obj, 'pull', 'Passage to quote \u2014 blank uses the note itself'));
+  }
+  return wrap;
+}
+
+
 /* ===================== router ===================== */
 const now0 = new Date();
 let pullOpen = false, weekPullOpen = false, weekGoalOpen = false, monthPickOpen = false;
@@ -1615,6 +1681,7 @@ function viewToday() {
   tc.append(E('div', { cls: 'rule' }));
   tc.append(field(isNow ? 'Notes on today' : 'Notes', areaWithLinks(D, 'note',
     'What happened, what you noticed, what you made. Paste links freely.', 1, S.links)));
+  if ((D.note || '').trim() || (D.themes || []).length) tc.append(tagRow(D, render, { cite: true }));
   v.append(tc);
 
   /* carried over */
@@ -1962,6 +2029,7 @@ function viewWeek() {
     () => W.todos.filter(t => !t.d).map(t => ({ title: t.t, due: iso(sun) })))));
   c3.append(E('div', { cls: 'rule' }));
   c3.append(field('Notes', areaWithLinks(W, 'notes', '', 1, S.links)));
+  if ((W.notes || '').trim() || (W.themes || []).length) c3.append(tagRow(W, render, { cite: true }));
   v.append(c3);
 
   /* where the week's effort actually went */
@@ -2130,6 +2198,13 @@ function viewMonth() {
     });
     v.append(hc2);
   }
+
+  /* notes on the month */
+  const mnc = E('div', { cls: 'card' });
+  mnc.append(E('h2', { text: 'Notes on the month' }));
+  mnc.append(areaWithLinks(M, 'note', 'What this month was actually like.', 1, S.links));
+  if ((M.note || '').trim() || (M.themes || []).length) mnc.append(tagRow(M, render, { cite: true }));
+  v.append(mnc);
 
   /* review */
   M.review = M.review || {}; M.review.byGoal = M.review.byGoal || {}; M.snap = M.snap || {};
@@ -3098,7 +3173,7 @@ function pageLists() {
 }
 
 /* ---------- notes ---------- */
-let noteFilter = null;
+let noteFilter = null, noteScope = 'all';
 
 function pageNotes() {
   const v = E('div');
@@ -3121,6 +3196,39 @@ function pageNotes() {
         : 'No studio sessions on this thread yet.' }));
     }
   }
+  const scopes = [['all', 'Everything'], ['loose', 'Loose notes'], ['journal', 'From the diary']];
+  const sc2 = E('div', { cls: 'chips', style: 'margin-bottom:14px' });
+  scopes.forEach(([k, label]) => sc2.append(E('button', {
+    cls: 'chip' + (noteScope === k ? ' on' : ''), style: noteScope === k ? 'background:var(--acc)' : '',
+    text: label, onclick: () => { noteScope = k; render(); } })));
+  v.append(sc2);
+
+  if (noteScope !== 'loose') {
+    const jn = journalEntries().filter(j => !noteFilter || (j.obj.themes || []).some(x => sameTheme(x, noteFilter)));
+    if (jn.length) {
+      const jc = E('div', { cls: 'card' });
+      jc.append(E('div', { cls: 'head' }, [E('h2', { text: 'From the diary' }),
+        E('span', { cls: 'pct', text: jn.length })]));
+      jc.append(E('p', { cls: 'lede', text: 'Day, week and month notes. They stay where you wrote them \u2014 this is a way to read across them.' }));
+      jn.slice(0, 40).forEach(j => {
+        const blk = E('div', { style: 'padding:12px 0;border-top:1px solid var(--rule)' });
+        blk.append(E('button', { style: 'display:flex;width:100%;justify-content:space-between;gap:10px;text-align:left',
+          onclick: j.open }, [
+          E('span', { cls: 'eyebrow', style: 'color:var(--acc)', text: j.label }),
+          E('span', { cls: 'pct', text: j.kind + ' \u203a' })
+        ]));
+        if ((j.body || '').trim()) blk.append(E('p', { style: 'margin:6px 0 0;font-size:14.5px' },
+          linkified(j.body.trim().length > 300 ? j.body.trim().slice(0, 300) + '\u2026' : j.body.trim())));
+        blk.append(tagRow(j.obj, render, { cite: true }));
+        jc.append(blk);
+      });
+      if (jn.length > 40) jc.append(E('div', { cls: 'pct', style: 'margin-top:10px', text: 'showing the most recent 40' }));
+      v.append(jc);
+    }
+  }
+
+  if (noteScope === 'journal') return v;
+
   S.notes.filter(n => !noteFilter || (n.themes || []).some(x => sameTheme(x, noteFilter))).forEach(n => {
     const i = S.notes.indexOf(n);
     const c = E('div', { cls: 'card' });
@@ -4344,13 +4452,17 @@ function allThemeCounts() {
   };
   S.studio.entries.filter(e => !e.draft).forEach(e => (e.themes || []).forEach(t => add(t, 'sessions')));
   (S.notes || []).forEach(n => (n.themes || []).forEach(t => add(t, 'notes')));
+  journalEntries().forEach(j => (j.obj.themes || []).forEach(t => add(t, 'notes')));
   return Object.values(groups).map(g => ({
     label: Object.keys(g.forms).sort((a, b) => g.forms[b] - g.forms[a])[0],
     n: g.n, sessions: g.sessions, notes: g.notes
   })).sort((a, b) => b.n - a.n);
 }
 function notesWithTheme(t) {
-  return (S.notes || []).filter(n => (n.themes || []).some(x => sameTheme(x, t)));
+  return (S.notes || []).filter(n => (n.themes || []).some(x => sameTheme(x, t)))
+    .map(n => ({ title: n.title || 'Untitled note', body: n.body || '' }))
+    .concat(journalEntries().filter(j => (j.obj.themes || []).some(x => sameTheme(x, t)))
+      .map(j => ({ title: j.label, body: j.body || '' })));
 }
 function entriesWithTheme(t) {
   return S.studio.entries.filter(e => !e.draft && (e.themes || []).some(x => sameTheme(x, t)));
@@ -4690,6 +4802,7 @@ const workOf = id => (S.studio.works || []).find(w => w.id === id);
 const sessionsOfWork = id => S.studio.entries.filter(e => !e.draft && e.work === id);
 const evidenceSessions = () => S.studio.entries.filter(e => !e.draft && e.key);
 const evidenceNotes = () => (S.notes || []).filter(n => n.key);
+const evidenceJournal = () => journalEntries().filter(j => j.obj.key);
 /* one pool, whatever it came from */
 function evidencePool() {
   return evidenceSessions().map(e => ({
@@ -4701,6 +4814,9 @@ function evidencePool() {
     id: n.id, kind: 'note', date: n.date || n.up || '', title: n.title || '',
     label: n.title || 'Untitled note',
     quote: (n.pull || '').trim() || (n.body || '').trim(), forAction: '', themes: n.themes || []
+  }))).concat(evidenceJournal().map(j => ({
+    id: j.id, kind: 'note', date: j.date, title: j.label, label: j.label,
+    quote: (j.obj.pull || '').trim() || (j.body || '').trim(), forAction: '', themes: j.obj.themes || []
   }))).sort((a, b) => a.date < b.date ? -1 : 1);
 }
 const evidenceById = id => evidencePool().find(x => x.id === id);
