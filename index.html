@@ -930,6 +930,36 @@ function dropAnchor(w, i){
   return true;
 }
 
+/* Add an anchor at whichever end of the wiggle is nearer the tap, and
+   put it where you tapped. Growing from a click beats growing from the
+   slider: the mark goes where you point rather than wherever the noise
+   sends it. */
+function addAnchorAt(w, p){
+  var v = viewPts(w);
+  if (!v.length) return false;
+  var c = centre(w);
+  var d0 = Math.hypot(v[0].x*W - p.x, v[0].y*H - p.y);
+  var d1 = Math.hypot(v[v.length-1].x*W - p.x, v[v.length-1].y*H - p.y);
+  var atEnd = d1 <= d0;
+  /* the tap is in view space; run it back through the transform */
+  var q = unplace({ x:p.x/W, y:p.y/H }, w, c);
+  q = { x: clamp(q.x, -0.5, 1.5), y: clamp(q.y, -0.5, 1.5) };
+
+  var at = span(w);
+  if (w.grow === 'resample'){
+    if (atEnd) w.base.push(q); else w.base.unshift(q);
+  } else if (atEnd){
+    w.base.splice(at + w.n, 0, q);
+  } else {
+    w.base.splice(at, 0, q);
+    if (w.grow === 'start' || w.grow === 'both') w.seedLen = (w.seedLen||3) + 1;
+  }
+  w.n = w.n + 1;
+  if (w.n > w.maxN) w.maxN = w.n;
+  setAnchors(w, w.n);
+  return true;
+}
+
 /* which anchor is under the pointer, if any */
 function anchorAt(w, p){
   var v=viewPts(w), best=-1, bd=HIT*HIT;
@@ -983,8 +1013,18 @@ function onUp(){
     render();
     queueSave();
   }
-  /* a clean click — no anchor grabbed, no movement — toggles the preview */
-  if (!wasDrag && !moved && el.fs && el.fs.checked) setFull(!isFull);
+  /* A clean tap — nothing grabbed, no movement. With fullscreen armed
+     that toggles the preview; otherwise, while anchors are showing, it
+     extends the active wiggle from its nearer end. */
+  if (!wasDrag && !moved){
+    if (el.fs && el.fs.checked) setFull(!isFull);
+    else if (el.pts.checked && downAt){
+      var a2 = activeW();
+      if (a2 && addAnchorAt(a2.w, pos({clientX:downAt.x, clientY:downAt.y}))){
+        build(); refresh();
+      }
+    }
+  }
   downAt = null; moved = false;
 }
 
@@ -1287,12 +1327,9 @@ function build(){
       slider(wb,'growth reach',0.01,0.40,0.005,w.reach||0.08,
         function(v){return v.toFixed(3);},
         function(v){ w.reach=v; refresh(); });
-      var ns = slider(wb,'anchors',3,w.maxN,1,w.n,function(v){return v.toFixed(0);},
+      slider(wb,'anchors',3,Math.max(24, w.base.length + 8),1,w.n,
+        function(v){return v.toFixed(0);},
         function(v){ setAnchors(w, v); refresh(); });
-      num(wb,'max anchors',w.maxN,3,400,function(v){
-        w.maxN=v; ns.max=v;
-        if (+ns.value>v){ ns.value=v; setAnchors(w, v); refresh(); }
-      });
       check(wb,'visible',w.show,function(v){ w.show=v; refresh(); });
 
       if (layers.length > 1){
@@ -2127,7 +2164,9 @@ function boot(){
   });
 
   el.note.textContent='Open a wiggle to make it active, tick anchors, then drag its dots. '+
-    'Right-click an anchor to delete it, or hold it down on a touch screen.';
+    'Tap the canvas to add one at the nearer end. Right-click an anchor to delete it, '+
+    'or hold it down on a touch screen. Tapping toggles fullscreen instead while that '+
+    'box is ticked.';
   resetAll();
   var restored = restoreAutosave();      /* picks up where the last session stopped */
   if (!restored){ build(); relayout(); refresh(); }
