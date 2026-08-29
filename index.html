@@ -171,6 +171,18 @@ var spread = 0.35, hueStep = 24, newBlend = 'multiply';
 /* Strokes never overlap their neighbours. Always on, and always confined
    to one layer — marks on different layers are meant to cross. */
 var sepGap = 6, sepThin = true, sepThinnest = 0.3;
+/* Keep the grounds from settling toward dark, light or mid.
+
+   Multiply compounds: each ground takes a share of what is left, so a
+   stack of them drifts far further toward black than toward white, and
+   the average creeps down however the individual ranges are set. This
+   watches the grounds alone — no wiggles, no reference — and holds
+   their long-run average at the midpoint of what they can actually
+   reach. Individual frames still run as dark or as light as they like;
+   only the bias is removed. */
+var lightGuard = true, lightPull = 0.5;
+var lightMin = 50, lightMax = 700;      /* hard floor and ceiling, R+G+B */
+var groundTrim = 1, lumaAvg = null;
 /* The reference is layer 1: the surface everything else is painted onto,
    at full strength beneath the stack. It can be floated above the work
    when you want to trace against your own marks instead. */
@@ -254,14 +266,15 @@ function newWiggle(seed){
     n:base.length, maxN:60, grow:'both', reach:0.08, seedLen:base.length,
     sat:50, w:1, wBase:0.09, tight:0,
     tx:0, ty:0, rot:0, scale:1,
-    satDrift:0, satSpeed:1, wDrift:0, wSpeed:1,
+    satLo:50, satHi:50, satSpeed:1, wDrift:0, wSpeed:1,
     drift:0, speed:1, brush:false, load:0.35, swell:0.25, bite:0.30,
     show:true, open:true };
 }
 function newLayer(hue, blend){
   var id = ++uid;
   return { id:id, hue:hue, blend:blend||'source-over', mute:false, solo:false, open:true,
-    ground:{opacity:0.5, opDrift:0, opSpeed:1, seed:id*13, show:true, open:false},
+    ground:{opacity:0.5, opLo:0.5, opHi:0.5, opSpeed:1, seed:id*13,
+            show:true, open:false},
     wiggles:[] };
 }
 /* The bottom layer multiplies like every other. On white that reads the
@@ -428,28 +441,92 @@ function unplace(p,w,c){
   var a=w.rot*Math.PI/180, cs=Math.cos(a), sn=Math.sin(a);
   return { x: c.x + (u*cs+v*sn)/W, y: c.y + (-u*sn+v*cs)/H };
 }
-/* Hold an anchor inside the picture. The stroke's own half-width is
-   allowed for, so a fat mark stops further in than a thin one and no
-   part of it runs off the edge. */
+/* Hold an anchor inside the picture, allowing for the stroke's own
+   half-width. A cheap first pass — it is not enough on its own, because
+   the curve bulges outside the anchors that define it. */
 function reinIn(p, w){
   var r = strokeRadius(w);
   var mx = Math.min(r / W, 0.45), my = Math.min(r / H, 0.45);
   return { x: clamp(p.x, mx, 1 - mx), y: clamp(p.y, my, 1 - my) };
 }
 
-/* what the wiggle looks like on screen: drift, transform, then reined in */
+/* Bring the whole drawn mark inside the canvas. Measures the curve, not
+   the anchors — a Catmull-Rom span swings wide of the points that steer
+   it, and the stroke width widens that again. The mark slides back as a
+   whole so its shape survives; only if it is genuinely too big for the
+   canvas does it shrink toward its own centre. */
+var EDGE_PAD = 5;                      /* clear space beyond the stroke */
+function fitInside(pts, w, squeeze){
+  var r = strokeRadius(w) * (squeeze == null ? 1 : squeeze) + EDGE_PAD;
+  var i, S, x0, y0, x1, y1;
+
+  function measure(P){
+    S = samplePath(P, w.tight, 14);   /* finer than the drawn curve, so the
+                                         bulge between samples is covered */
+    x0=1e9; y0=1e9; x1=-1e9; y1=-1e9;
+    for (i=0;i<S.length;i++){
+      if (S[i].x<x0) x0=S[i].x;  if (S[i].x>x1) x1=S[i].x;
+      if (S[i].y<y0) y0=S[i].y;  if (S[i].y>y1) y1=S[i].y;
+    }
+  }
+  measure(pts);
+
+  /* Room for the curve once the stroke is allowed for. Solved directly:
+     the width does not shrink with the path, so scaling by the ratio of
+     spans would never converge. */
+  var availW = W - 2*r, availH = H - 2*r;
+  var spanX = x1-x0, spanY = y1-y0;
+  var k = 1;
+  if (availW > 1 && spanX > availW) k = Math.min(k, availW/spanX);
+  if (availH > 1 && spanY > availH) k = Math.min(k, availH/spanY);
+
+  var out = pts;
+  if (k < 1){
+    var cx=(x0+x1)/2, cy=(y0+y1)/2;
+    out = [];
+    for (i=0;i<pts.length;i++)
+      out.push({ x: (cx + (pts[i].x*W - cx)*k)/W, y: (cy + (pts[i].y*H - cy)*k)/H });
+    measure(out);
+  }
+
+  var dx=0, dy=0;
+  if (x0-r < 0) dx = r-x0; else if (x1+r > W) dx = W-r-x1;
+  if (y0-r < 0) dy = r-y0; else if (y1+r > H) dy = H-r-y1;
+  if (!dx && !dy) return out;
+
+  var moved=[];
+  for (i=0;i<out.length;i++)
+    moved.push({ x: out[i].x + dx/W, y: out[i].y + dy/H });
+  return moved;
+}
+
+/* what the wiggle looks like on screen: drift, transform, then fitted */
 function viewPts(w){
   var c=centre(w);
-  return w.pts.map(function(p,i){ return reinIn(place(shift(p,i,w),w,c), w); });
+  var out = w.pts.map(function(p,i){ return place(shift(p,i,w),w,c); });
+  return fitInside(out, w, 1);
+}
+/* where the mark sits with the drift wound off — the position you drew */
+function restPts(w){
+  var c=centre(w);
+  var out = w.pts.map(function(p){ return place(p,w,c); });
+  return fitInside(out, w, 1);
 }
 
 /* Colour that breathes. Saturation and ground opacity wander on the same
    clock as the anchors, so a layer can pulse between washed-out and full
    without the drawing itself moving. */
+/* Drift as a range rather than a centre and a swing. The old form was
+   value +/- drift, clipped at the ends — and clipping was lopsided
+   whenever the value sat off-centre, so the average crept away from
+   where it was set. A range cannot bias: the value simply wanders
+   between the two ends you chose. */
 function effSat(w){
-  if (!w.satDrift) return w.sat;
+  var lo = w.satLo == null ? w.sat : w.satLo;
+  var hi = w.satHi == null ? w.sat : w.satHi;
+  if (hi <= lo) return clamp(lo, 0, 100);
   var n = noise2(w.id*53+7, t*(w.satSpeed||1));
-  return clamp(w.sat + (n-0.5)*200*w.satDrift, 0, 100);
+  return clamp(lo + n*(hi-lo), 0, 100);
 }
 /* weight drifts as a multiplier, so a thin mark stays thin in proportion */
 function effW(w){
@@ -457,10 +534,15 @@ function effW(w){
   var n = noise2(w.id*97+19, t*(w.wSpeed||1));
   return Math.max(0.01, w.w * (1 + (n-0.5)*2*w.wDrift));
 }
-function effOp(g){
-  if (!g.opDrift) return g.opacity;
+function rawOp(g){
+  var lo = g.opLo == null ? g.opacity : g.opLo;
+  var hi = g.opHi == null ? g.opacity : g.opHi;
+  if (hi <= lo) return lo;
   var n = noise2((g.seed||11)+31, t*(g.opSpeed||1));
-  return clamp(g.opacity + (n-0.5)*2*g.opDrift, 0, 1);
+  return lo + n*(hi-lo);
+}
+function effOp(g){
+  return clamp(rawOp(g) * groundTrim, 0, 1);
 }
 
 function shift(pt,i,w){
@@ -481,14 +563,38 @@ function strokeRadius(w){
   return w.wBase * R * effW(w) * w.scale / 2;
 }
 function polyline(pts, tight){
+  return samplePath(pts, tight, 8).map(function(q){ return {x:q.x, y:q.y}; });
+}
+
+/* Sample the curve, remembering which pair of anchors each sample sits
+   between. Testing anchors alone let the curve *between* them cross a
+   neighbour untouched, which is where the overlaps were coming from. */
+function samplePath(pts, tight, per){
   var pad=[pts[0]].concat(pts,[pts[pts.length-1]]), out=[], i, k;
-  for (i=0;i<pad.length-3;i++)
-    for (k=(i===0?0:1); k<=8; k++){
-      var q=catmull(pad[i],pad[i+1],pad[i+2],pad[i+3],k/8,tight);
-      out.push({ x:q.x*W, y:q.y*H });
+  for (i=0;i<pad.length-3;i++){
+    for (k=(i===0?0:1); k<=per; k++){
+      var u=k/per;
+      var q=catmull(pad[i],pad[i+1],pad[i+2],pad[i+3],u,tight);
+      out.push({ x:q.x*W, y:q.y*H, a:i, u:u });   /* between anchor i and i+1 */
     }
+  }
   return out;
 }
+function boundsOf(samples, pad){
+  var b={x0:1e9,y0:1e9,x1:-1e9,y1:-1e9}, i;
+  for (i=0;i<samples.length;i++){
+    if (samples[i].x<b.x0) b.x0=samples[i].x;
+    if (samples[i].x>b.x1) b.x1=samples[i].x;
+    if (samples[i].y<b.y0) b.y0=samples[i].y;
+    if (samples[i].y>b.y1) b.y1=samples[i].y;
+  }
+  b.x0-=pad; b.y0-=pad; b.x1+=pad; b.y1+=pad;
+  return b;
+}
+function boxesMiss(a,b){
+  return a.x1<b.x0 || b.x1<a.x0 || a.y1<b.y0 || b.y1<a.y0;
+}
+
 /* shortest distance from a point to a segment, and the direction away */
 function pushOff(px, py, a, b){
   var vx=b.x-a.x, vy=b.y-a.y;
@@ -499,72 +605,89 @@ function pushOff(px, py, a, b){
   var dx=px-cx, dy=py-cy;
   var d=Math.sqrt(dx*dx+dy*dy);
   if (d > 1e-6) return { d:d, nx:dx/d, ny:dy/d };
-  /* Sitting exactly on the other curve there is no direction to push, so
-     step off sideways along the segment's normal. Callers flip the sign
-     per pair, or two coincident strokes would shove the same way and
-     never part. */
+  /* sitting exactly on the other curve there is no direction to push, so
+     step off sideways along the segment's normal; callers flip the sign */
   var len = Math.sqrt(L) || 1;
   return { d:0, nx:-vy/len, ny:vx/len };
 }
-function keepApart(items, gap, thin, thinnest){
-  var passes=4, p, i, j, k, m;
-  /* wid[i][k] is how wide anchor k of wiggle i is allowed to be, as a
-     fraction of its set weight — 1 means untouched */
-  for (i=0;i<items.length;i++) items[i].squeeze = 1;
-  var floor = thin ? clamp(thinnest, 0.05, 1) : 1;
 
-  for (p=0;p<passes;p++){
-    var lines=[];
-    for (i=0;i<items.length;i++) lines.push(polyline(items[i].pts, items[i].w.tight));
-    var moved=false;
+/* Keep the wiggles on a layer off one another.
+
+   Rather than shove overlapping strokes about, this winds their drift
+   back. Drift is what brings two marks together, so easing a wiggle
+   toward the position and weight you actually gave it is the move that
+   undoes the collision — and it can only ever leave a mark somewhere you
+   put it. Each wiggle carries a settle value: 0 is fully adrift, 1 is
+   fully at rest. Colliding wiggles settle a step at a time until they
+   are clear, and drift freely again once they are.
+
+   Two marks drawn crossing each other will still cross. Nothing here can
+   fix that, and it shouldn't: the rule protects your drawing from the
+   drift, not from you. */
+function keepApart(items, gap){
+  var steps=8, i, j, k, m, st;
+  for (i=0;i<items.length;i++){
+    items[i].drifted = items[i].pts;
+    items[i].rest    = restPts(items[i].w);
+    items[i].settle  = 0;
+    items[i].squeeze = 1;
+  }
+  function shape(it){
+    if (it.settle <= 0) return it.drifted;
+    if (it.settle >= 1) return it.rest;
+    var out=[], b=it.settle;
+    for (var q=0;q<it.drifted.length;q++)
+      out.push({ x: lerp(it.drifted[q].x, it.rest[q].x, b),
+                 y: lerp(it.drifted[q].y, it.rest[q].y, b) });
+    return out;
+  }
+  function widthOf(it){
+    /* weight winds back with position, toward the width you set */
+    return lerp(effW(it.w), it.w.w, it.settle) * it.w.wBase * R * it.w.scale / 2;
+  }
+
+  for (st=0; st<steps; st++){
+    for (i=0;i<items.length;i++) items[i].pts = shape(items[i]);
+    var S=[], B=[], clash=[], any=false;
     for (i=0;i<items.length;i++){
-      for (k=0;k<items[i].pts.length;k++){
-        var ax=items[i].pts[k].x*W, ay=items[i].pts[k].y*H;
-        var ri = strokeRadius(items[i].w) * items[i].squeeze;
-        for (j=0;j<items.length;j++){
-          if (j===i) continue;
-          var need = ri + strokeRadius(items[j].w) * items[j].squeeze + gap;
-          var line = lines[j];
-          var best=null;
-          for (m=1;m<line.length;m++){
-            var hit = pushOff(ax, ay, line[m-1], line[m]);
-            if (!best || hit.d < best.d) best = hit;
-          }
-          if (best && best.d < need){
-            var short = need - best.d;
-            /* Width yields first, up to the floor. It costs nothing to
-               move and resolves crowding the position pass alone cannot,
-               then the rest is taken up by shifting the anchor. */
-            var give = 0;
-            if (floor < 1){
-              var lowest = strokeRadius(items[i].w) * floor;
-              var room = ri - lowest;
-              give = Math.min(room, short * 0.6);
-              if (give > 0){
-                ri -= give;
-                /* one width for the whole stroke: the tightest spot sets it,
-                   so a wiggle stays an even thickness end to end */
-                var scale = ri / strokeRadius(items[i].w);
-                if (scale < items[i].squeeze) items[i].squeeze = scale;
-                short -= give;
-                moved = true;
-              }
-            }
-            if (short > 0){
-              var shove = short * 0.5;
-              var sign = best.d > 1e-6 ? 1 : (i < j ? 1 : -1);
-              ax += best.nx * shove * sign;
-              ay += best.ny * shove * sign;
-              moved = true;
-            }
+      S.push(samplePath(items[i].pts, items[i].w.tight, 6));
+      B.push(boundsOf(S[i], widthOf(items[i]) + gap));
+      clash.push(false);
+    }
+    for (i=0;i<items.length;i++){
+      for (j=i+1;j<items.length;j++){
+        if (boxesMiss(B[i],B[j])) continue;
+        var need = widthOf(items[i]) + widthOf(items[j]) + gap;
+        var hit=false;
+        for (k=0;k<S[i].length && !hit;k++){
+          for (m=1;m<S[j].length;m++){
+            if (pushOff(S[i][k].x, S[i][k].y, S[j][m-1], S[j][m]).d < need){ hit=true; break; }
           }
         }
-        items[i].pts[k] = reinIn({ x: ax/W, y: ay/H }, items[i].w);
+        if (hit){ clash[i]=true; clash[j]=true; any=true; }
       }
     }
-    if (!moved) break;
+    if (!any) break;
+    for (i=0;i<items.length;i++)
+      if (clash[i] && items[i].settle < 1)
+        items[i].settle = Math.min(1, items[i].settle + 1/steps);
+  }
+  for (i=0;i<items.length;i++){
+    items[i].pts = shape(items[i]);
+    items[i].squeeze = lerp(effW(items[i].w), items[i].w.w, items[i].settle) / effW(items[i].w);
   }
   return items;
+}
+function centreOf(samples){
+  var x=0, y=0, i;
+  for (i=0;i<samples.length;i++){ x+=samples[i].x; y+=samples[i].y; }
+  return { x:x/samples.length, y:y/samples.length };
+}
+function slideBy(item, dx, dy){
+  var out=[];
+  for (var k=0;k<item.pts.length;k++)
+    out.push({ x: item.pts[k].x + dx/W, y: item.pts[k].y + dy/H });
+  item.pts = fitInside(out, item.w, item.squeeze);
 }
 
 /* ---------- drawing ---------- */
@@ -592,7 +715,7 @@ function render(){
       if (!l.wiggles[j].show) continue;
       items.push({ w:l.wiggles[j], pts:viewPts(l.wiggles[j]) });
     }
-    if (items.length > 1) keepApart(items, sepGap, sepThin, sepThinnest);
+    if (items.length > 1) keepApart(items, sepGap);
     for (j=0;j<items.length;j++){
       if (items[j].w.brush) brushStroke(items[j].pts, items[j].w, l.hue, items[j].squeeze);
       else lineStroke(items[j].pts, items[j].w, l.hue, items[j].squeeze);
@@ -603,8 +726,78 @@ function render(){
   ctx.globalCompositeOperation='source-over';
   ctx.globalAlpha=1;
   if (refImg && refShow && refOnTop) drawRef();
+  measureLight();
   if (el.pts.checked) drawAnchors();
 }
+
+/* Composite the grounds by arithmetic — they are flat fills, so the
+   whole stack resolves to one colour — and report its R+G+B. */
+function blendPair(mode, cs, cb){
+  switch (mode){
+    case 'multiply':    return cs*cb/255;
+    case 'screen':      return 255 - (255-cs)*(255-cb)/255;
+    case 'darken':      return Math.min(cs,cb);
+    case 'lighten':     return Math.max(cs,cb);
+    case 'difference':  return Math.abs(cs-cb);
+    case 'exclusion':   return cs + cb - 2*cs*cb/255;
+    case 'overlay':     return cb<128 ? 2*cs*cb/255 : 255-2*(255-cs)*(255-cb)/255;
+    case 'hard-light':  return cs<128 ? 2*cs*cb/255 : 255-2*(255-cs)*(255-cb)/255;
+    case 'color-burn':  return cs<=0 ? 0 : 255 - Math.min(255,(255-cb)*255/cs);
+    case 'color-dodge': return cs>=255 ? 255 : Math.min(255, cb*255/(255-cs));
+    case 'soft-light':  { var b=cb/255, sC=cs/255;
+      var r = sC<=0.5 ? b-(1-2*sC)*b*(1-b)
+                      : b + (2*sC-1)*((b<=0.25 ? ((16*b-12)*b+4)*b : Math.sqrt(b))-b);
+      return r*255; }
+    default:            return cs;                 /* normal, and the rest */
+  }
+}
+function groundLuma(trim, atMax){
+  var dst=[255,255,255], i, k;
+  for (i=0;i<layers.length;i++){
+    var l=layers[i];
+    if (!vis(l) || !l.ground.show) continue;
+    var m=hsv(l.hue,100,BRI).match(/\d+/g);
+    var src=[+m[0],+m[1],+m[2]];
+    var g=l.ground;
+    var base = atMax ? (g.opHi == null ? g.opacity : g.opHi) : rawOp(g);
+    var a=clamp(base*trim, 0, 1);
+    for (k=0;k<3;k++){
+      var mixed=blendPair(l.blend, src[k], dst[k]);
+      dst[k] = dst[k] + (mixed - dst[k])*a;
+    }
+  }
+  return dst[0]+dst[1]+dst[2];
+}
+
+/* Nudge the trim so the running average of the grounds sits at the
+   middle of the range they can reach. Slow, so single frames are free
+   to go anywhere. */
+function measureLight(){
+  if (!lightGuard){ groundTrim = 1; lumaAvg = null; return; }
+  var now = groundLuma(groundTrim);
+  lumaAvg = (lumaAvg == null) ? now : lumaAvg + (now - lumaAvg)*0.01;
+  /* the darkest the grounds could ever be, so the midpoint holds still
+     rather than chasing the drift */
+  var darkest = groundLuma(1, true);
+  var mid = (765 + darkest)/2;
+  var off = lumaAvg - mid;
+  if (Math.abs(off) >= 4)
+    /* more ground means darker, so a too-light average calls for more of it */
+    groundTrim = clamp(groundTrim + (off > 0 ? 1 : -1) * 0.006 * lightPull, 0.02, 4);
+
+  /* Hard limits, applied straight away rather than averaged. Solved by
+     bisection: find the trim that puts this frame back inside the range. */
+  if (now < lightMin || now > lightMax){
+    var target = now < lightMin ? lightMin : lightMax;
+    var lo = 0.02, hi = 4, k;
+    for (k=0;k<18;k++){
+      var midT = (lo+hi)/2;
+      if (groundLuma(midT) > target) lo = midT; else hi = midT;
+    }
+    groundTrim = clamp((lo+hi)/2, 0.02, 4);
+  }
+}
+
 function drawRef(){
   var k=Math.min(W/refImg.width, H/refImg.height);
   var dw=refImg.width*k, dh=refImg.height*k;
@@ -900,6 +1093,7 @@ function section(host,title,colFn,open,o){
 function build(){
   var host=el.panels;
   host.innerHTML='';
+  buildGroundRange(host);
 
   /* canvas + reference */
   var cb=section(host,'Canvas & reference',function(){return '#EFEDE4';},false);
@@ -967,14 +1161,13 @@ function build(){
   var sb=section(host,'Stroke spacing',function(){return '#EFEDE4';},false);
   slider(sb,'gap between strokes, px',0,40,1,sepGap,
     function(v){return v.toFixed(0)+'px';}, function(v){ sepGap=v; refresh(); });
-  check(sb,'let strokes thin to fit',sepThin,function(v){ sepThin=v; refresh(); });
-  slider(sb,'thinnest allowed',0.05,1,0.01,sepThinnest,
-    function(v){return Math.round(v*100)+'%';}, function(v){ sepThinnest=v; refresh(); });
+
+
   var sh=document.createElement('p'); sh.className='hint';
-  sh.textContent='Wiggles never overlap others on their own layer. Width gives way '+
-    'first, narrowing only where a stroke passes close to a neighbour; the rest is '+
-    'taken up by shifting. Layers still cross each other freely, and anchors always '+
-    'show where you actually drew.';
+  sh.textContent='When drift carries two wiggles on the same layer into each other, '+
+    'they wind back toward the position and weight you gave them until they are '+
+    'clear, then drift on. Layers still cross each other freely. Marks drawn '+
+    'crossing stay crossed \u2014 the rule holds off the drift, not your drawing.';
   sb.appendChild(sh);
 
   /* the layers */
@@ -1004,20 +1197,25 @@ function build(){
     ah.textContent='Holds the strokes on this layer clear of one another as they '+
       'drift. Anchors still show where you actually drew.';
     lb.appendChild(ah);
-    check(lb,'mute',l.mute,function(v){ l.mute=v; refresh(); });
-    check(lb,'solo',l.solo,function(v){ l.solo=v; refresh(); });
 
     var g=l.ground;
     var gb=section(lb,'Ground',function(){return hex(l.hue,100,BRI);},g.open,{
       onToggle:function(o){ g.open=o; },
       isOff:function(){ return !g.show; }
     });
-    slider(gb,'opacity',0,1,0.01,g.opacity,function(v){return v.toFixed(2);},
-      function(v){ g.opacity=v; refresh(); });
-    slider(gb,'opacity drift',0,1,0.01,g.opDrift,function(v){return v.toFixed(2);},
-      function(v){ g.opDrift=v; refresh(); });
+    var gLo, gHi;
+    gLo = slider(gb,'opacity from',0,1,0.01,g.opLo==null?g.opacity:g.opLo,
+      function(v){return v.toFixed(2);},
+      function(v){ g.opLo=v; if (g.opHi<v){ g.opHi=v; gHi.value=v; } refresh(); });
+    gHi = slider(gb,'opacity to',0,1,0.01,g.opHi==null?g.opacity:g.opHi,
+      function(v){return v.toFixed(2);},
+      function(v){ g.opHi=v; if (g.opLo>v){ g.opLo=v; gLo.value=v; } refresh(); });
     slider(gb,'drift speed',0.05,4,0.05,g.opSpeed||1,function(v){return v.toFixed(2)+'x';},
       function(v){ g.opSpeed=v; refresh(); });
+    var gh2=document.createElement('p'); gh2.className='hint';
+    gh2.textContent='Set both the same for a still ground. Apart, the opacity '+
+      'wanders between them \u2014 no bias, whatever the two values are.';
+    gb.appendChild(gh2);
     check(gb,'visible',g.show,function(v){ g.show=v; refresh(); });
     var gh=document.createElement('p'); gh.className='hint';
     gh.textContent='Full saturation always. At 1 the ground covers everything below it.';
@@ -1031,10 +1229,13 @@ function build(){
         isOn:function(){ return w.id===activeId; },
         isOff:function(){ return !w.show; }
       });
-      slider(wb,'saturation',0,100,1,w.sat,function(v){return v.toFixed(0);},
-        function(v){ w.sat=v; refresh(); });
-      slider(wb,'saturation drift',0,1,0.01,w.satDrift,function(v){return v.toFixed(2);},
-        function(v){ w.satDrift=v; refresh(); });
+      var sLo, sHi;
+      sLo = slider(wb,'saturation from',0,100,1,w.satLo==null?w.sat:w.satLo,
+        function(v){return v.toFixed(0);},
+        function(v){ w.satLo=v; if (w.satHi<v){ w.satHi=v; sHi.value=v; } refresh(); });
+      sHi = slider(wb,'saturation to',0,100,1,w.satHi==null?w.sat:w.satHi,
+        function(v){return v.toFixed(0);},
+        function(v){ w.satHi=v; if (w.satLo>v){ w.satLo=v; sLo.value=v; } refresh(); });
       slider(wb,'saturation drift speed',0.05,4,0.05,w.satSpeed||1,
         function(v){return v.toFixed(2)+'x';}, function(v){ w.satSpeed=v; refresh(); });
       slider(wb,'stroke weight',0.02,5,0.01,w.w,function(v){return v.toFixed(2)+'x';},
@@ -1057,13 +1258,6 @@ function build(){
         function(v){ w.drift=v; refresh(); });
       slider(wb,'drift speed',0.05,4,0.05,w.speed,function(v){return v.toFixed(2)+'x';},
         function(v){ w.speed=v; refresh(); });
-      check(wb,'loaded brush',w.brush,function(v){ w.brush=v; refresh(); });
-      slider(wb,'brush load',-1,1,0.01,w.load,function(v){return v.toFixed(2);},
-        function(v){ w.load=v; refresh(); });
-      slider(wb,'brush swell',0,1,0.01,w.swell,function(v){return v.toFixed(2);},
-        function(v){ w.swell=v; refresh(); });
-      slider(wb,'brush bite',0,1,0.01,w.bite,function(v){return v.toFixed(2);},
-        function(v){ w.bite=v; refresh(); });
 
       picker(wb,'anchors grow from',
         [['both','both ends, alternating'],['end','the end'],['start','the start'],
@@ -1145,6 +1339,27 @@ function build(){
     }
   });
 }
+function buildGroundRange(host){
+  var lb2=section(host,'Ground range',function(){return '#EFEDE4';},true);
+  var gLoS, gHiS;
+  gLoS = slider(lb2,'darkest, R+G+B',0,765,5,lightMin,function(v){return v.toFixed(0);},
+    function(v){ lightMin=v; if (lightMax<v){ lightMax=v; gHiS.value=v; } refresh(); });
+  gHiS = slider(lb2,'lightest, R+G+B',0,765,5,lightMax,function(v){return v.toFixed(0);},
+    function(v){ lightMax=v; if (lightMin>v){ lightMin=v; gLoS.value=v; } refresh(); });
+  check(lb2,'no bias toward dark or light',lightGuard,
+    function(v){ lightGuard=v; groundTrim=1; lumaAvg=null; refresh(); });
+  slider(lb2,'how firmly',0,1,0.05,lightPull,function(v){return v.toFixed(2);},
+    function(v){ lightPull=v; refresh(); });
+  var lh=document.createElement('p'); lh.className='hint';
+  lh.textContent='The grounds never go outside these two levels \u2014 0 is black, '+
+    '765 is white. Measured on the grounds by themselves \u2014 no wiggles, no reference '+
+    '\u2014 and keeps their long-run average at the middle of the range they can '+
+    'reach. Any one frame is still free to go as dark or as light as the drift '+
+    'takes it; only the pull toward one end is removed. Multiply compounds toward '+
+    'black, so without this the average always sinks.';
+  lb2.appendChild(lh);
+}
+
 function moveL(l,d){
   var i=layers.indexOf(l), j=i+d;
   if (j<0||j>=layers.length) return;
@@ -1359,12 +1574,15 @@ function buildViewer(){
   var state={ title:title, cmW:cmW, cmH:cmH,
     layers:layers.map(function(l){
       return { hue:l.hue, blend:l.blend, show:vis(l),
-        ground:{opacity:l.ground.opacity, opDrift:l.ground.opDrift,
+        ground:{opacity:l.ground.opacity,
+                opLo:(l.ground.opLo==null?l.ground.opacity:l.ground.opLo),
+                opHi:(l.ground.opHi==null?l.ground.opacity:l.ground.opHi),
                 opSpeed:l.ground.opSpeed||1, seed:l.ground.seed||13, show:l.ground.show},
         wiggles:l.wiggles.map(function(w){
           return { id:w.id, sat:w.sat, w:w.w, wBase:w.wBase, tight:w.tight,
             tx:w.tx, ty:w.ty, rot:w.rot, scale:w.scale,
-            satDrift:w.satDrift, satSpeed:w.satSpeed||1,
+            satLo:(w.satLo==null?w.sat:w.satLo), satHi:(w.satHi==null?w.sat:w.satHi),
+            satSpeed:w.satSpeed||1,
             wDrift:w.wDrift||0, wSpeed:w.wSpeed||1,
             drift:w.drift, speed:w.speed, show:w.show,
             brush:w.brush, load:w.load, swell:w.swell, bite:w.bite,
@@ -1373,8 +1591,9 @@ function buildViewer(){
     }) };
 
   var fns=[clamp,lerp,hash2,noise2,hsv,catmull,tracePath,shift,
-    centre,place,strokeRadius,reinIn,viewPts,effSat,effW,effOp,
-    polyline,pushOff,keepApart,lineStroke,brushStroke]
+    centre,place,strokeRadius,reinIn,samplePath,fitInside,viewPts,restPts,
+    effSat,effW,effOp,boundsOf,boxesMiss,pushOff,keepApart,
+    lineStroke,brushStroke]
     .map(function(f){ return f.toString(); }).join('\n');
 
   var esc=function(s){ return String(s).replace(/[<&]/g,function(c){ return c==='<'?'&lt;':'&amp;'; }); };
@@ -1396,7 +1615,8 @@ function buildViewer(){
     'body.full canvas{box-shadow:none}',
     '</style></head><body>'+OPEN,
     'var BRI=100;',
-    'var SEP=' + JSON.stringify({gap:sepGap, thin:sepThin, thinnest:sepThinnest}) + ';',
+    'var groundTrim=1;',
+    'var SEP=' + JSON.stringify({gap:sepGap}) + ';',
     (refImg && refShow ? 'var REF=new Image(); REF.src=' + JSON.stringify(refDataURL()) + ';'
                        : 'var REF=null;'),
     'var REF_OP=' + refOpacity + ', REF_BLEND=' + JSON.stringify(refBlend) +
@@ -1483,7 +1703,7 @@ function buildViewer(){
     '    var items=[];',
     '    for (var j=0;j<l.wiggles.length;j++){ if(!l.wiggles[j].show) continue;',
     '      items.push({ w:l.wiggles[j], pts:viewPts(l.wiggles[j]) }); }',
-    '    if (items.length>1) keepApart(items, SEP.gap, SEP.thin, SEP.thinnest);',
+    '    if (items.length>1) keepApart(items, SEP.gap);',
     '    for (j=0;j<items.length;j++){',
     '      if (items[j].w.brush) brushStroke(items[j].pts, items[j].w, l.hue, items[j].squeeze);',
     '      else lineStroke(items[j].pts, items[j].w, l.hue, items[j].squeeze); }',
@@ -1564,8 +1784,7 @@ function exportPSD(){
         if (!l.wiggles[j].show) continue;
         items.push({ w:l.wiggles[j], pts:viewPts(l.wiggles[j]) });
       }
-      if (items.length>1)
-        keepApart(items, sepGap * (R/Math.min(oldW,oldH)), sepThin, sepThinnest);
+      if (items.length>1) keepApart(items, sepGap * (R/Math.min(oldW,oldH)));
       for (j=0;j<items.length;j++){
         if (items[j].w.brush) brushStroke(items[j].pts, items[j].w, l.hue, items[j].squeeze);
         else lineStroke(items[j].pts, items[j].w, l.hue, items[j].squeeze);
@@ -1602,16 +1821,20 @@ function projectData(){
     format:'wiggle-layers', version:PROJECT_VERSION,
     title: el.titleValue || 'Wiggle',
     cmW:cmW, cmH:cmH, hueStep:hueStep, spread:spread, newBlend:newBlend,
-    sepGap:sepGap, sepThin:sepThin, sepThinnest:sepThinnest,
+    sepGap:sepGap, lightGuard:lightGuard, lightPull:lightPull,
+    lightMin:lightMin, lightMax:lightMax,
     layers: layers.map(function(l){
       return { hue:l.hue, blend:l.blend, mute:!!l.mute, solo:!!l.solo, open:l.open,
-        ground:{ opacity:l.ground.opacity, opDrift:l.ground.opDrift||0,
+        ground:{ opacity:l.ground.opacity,
+                 opLo:(l.ground.opLo==null?l.ground.opacity:l.ground.opLo),
+                 opHi:(l.ground.opHi==null?l.ground.opacity:l.ground.opHi),
                  opSpeed:l.ground.opSpeed||1, seed:l.ground.seed||13,
                  show:l.ground.show, open:l.ground.open },
         wiggles: l.wiggles.map(function(w){
           return { sat:w.sat, w:w.w, wBase:w.wBase, tight:w.tight,
             tx:w.tx, ty:w.ty, rot:w.rot, scale:w.scale,
-            satDrift:w.satDrift||0, satSpeed:w.satSpeed||1,
+            satLo:(w.satLo==null?w.sat:w.satLo), satHi:(w.satHi==null?w.sat:w.satHi),
+            satSpeed:w.satSpeed||1,
             wDrift:w.wDrift||0, wSpeed:w.wSpeed||1,
             drift:w.drift||0, speed:w.speed||1,
             brush:!!w.brush, load:w.load, swell:w.swell, bite:w.bite,
@@ -1683,8 +1906,11 @@ function loadProject(text, quiet){
   spread = pick(d.spread, 0.35);
   newBlend = pick(d.newBlend, 'multiply');
   sepGap = pick(d.sepGap, 6);
-  sepThin = pick(d.sepThin, true);
-  sepThinnest = pick(d.sepThinnest, 0.3);
+  lightGuard = pick(d.lightGuard, true);
+  lightPull = pick(d.lightPull, 0.5);
+  lightMin = pick(d.lightMin, 50);
+  lightMax = pick(d.lightMax, 700);
+  groundTrim = 1; lumaAvg = null;
   el.titleValue = pick(d.title, 'Wiggle');
 
   layers = d.layers.map(function(L){
@@ -1692,7 +1918,8 @@ function loadProject(text, quiet){
     l.mute = !!L.mute; l.solo = !!L.solo; l.open = pick(L.open, true);
     var G = L.ground || {};
     l.ground.opacity = pick(G.opacity, 0.5);
-    l.ground.opDrift = pick(G.opDrift, 0);
+    l.ground.opLo = pick(G.opLo, pick(G.opacity, 0.5));
+    l.ground.opHi = pick(G.opHi, pick(G.opacity, 0.5));
     l.ground.opSpeed = pick(G.opSpeed, 1);
     l.ground.seed    = pick(G.seed, l.ground.seed);
     l.ground.show    = pick(G.show, true);
@@ -1700,7 +1927,7 @@ function loadProject(text, quiet){
     l.wiggles = (L.wiggles || []).map(function(Wg){
       var w = newWiggle(0);
       var keys = ['sat','w','wBase','tight','tx','ty','rot','scale',
-                  'satDrift','satSpeed','wDrift','wSpeed','drift','speed',
+                  'satLo','satHi','satSpeed','wDrift','wSpeed','drift','speed',
                   'load','swell','bite','n','maxN','grow','reach','seedLen'];
       keys.forEach(function(k){ if (Wg[k] !== undefined) w[k] = Wg[k]; });
       w.brush = !!Wg.brush;
