@@ -1701,7 +1701,7 @@ function buildViewer(){
   var fns=[clamp,lerp,hash2,noise2,hsv,catmull,tracePath,shift,
     centre,effTx,effTy,effRot,effScale,place,strokeRadius,reinIn,samplePath,
     fitInside,viewPts,restPts,
-    effSat,effW,effOp,boundsOf,boxesMiss,pushOff,keepApart,
+    effSat,effW,rawOp,effOp,boundsOf,boxesMiss,pushOff,keepApart,
     lineStroke,brushStroke]
     .map(function(f){ return f.toString(); }).join('\n');
 
@@ -1725,6 +1725,8 @@ function buildViewer(){
     '</style></head><body>'+OPEN,
     'var BRI=100;',
     'var groundTrim=1;',
+    'var EDGE_PAD=' + EDGE_PAD + ';',
+    'var sepGap=' + sepGap + ';',
     'var SEP=' + JSON.stringify({gap:sepGap}) + ';',
     (refImg && refShow ? 'var REF=new Image(); REF.src=' + JSON.stringify(refDataURL()) + ';'
                        : 'var REF=null;'),
