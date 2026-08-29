@@ -267,6 +267,7 @@ function newWiggle(seed){
     sat:50, w:1, wBase:0.09, tight:0,
     tx:0, ty:0, rot:0, scale:1,
     satLo:50, satHi:50, satSpeed:1, wDrift:0, wSpeed:1,
+    tDrift:0, rDrift:0, sDrift:0, tSpeed:1,
     drift:0, speed:1, brush:false, load:0.35, swell:0.25, bite:0.30,
     show:true, open:true };
 }
@@ -420,6 +421,26 @@ function tracePath(x, pts, s){
       p2.x*W, p2.y*H);
   }
 }
+/* The transform can drift too: the mark wanders, turns and swells around
+   the settings you gave it. Symmetric around each value, so there is no
+   pull in any direction. */
+function effTx(w){
+  if (!w.tDrift) return w.tx;
+  return w.tx + (noise2(w.id*61+5, t*(w.tSpeed||1)) - 0.5) * 0.6 * w.tDrift;
+}
+function effTy(w){
+  if (!w.tDrift) return w.ty;
+  return w.ty + (noise2(w.id*61+77, t*(w.tSpeed||1)) - 0.5) * 0.6 * w.tDrift;
+}
+function effRot(w){
+  if (!w.rDrift) return w.rot;
+  return w.rot + (noise2(w.id*83+13, t*(w.tSpeed||1)) - 0.5) * 360 * w.rDrift;
+}
+function effScale(w){
+  if (!w.sDrift) return w.scale;
+  return Math.max(0.05, w.scale * (1 + (noise2(w.id*107+41, t*(w.tSpeed||1)) - 0.5) * 2 * w.sDrift));
+}
+
 /* Place, turn and size a wiggle without touching its anchors. The maths
    runs in pixels so a rotation stays square on a non-square canvas, and
    it pivots on the wiggle's own centre rather than the canvas corner. */
@@ -428,12 +449,14 @@ function centre(w){
   for (var i=0;i<w.pts.length;i++){ sx+=w.pts[i].x; sy+=w.pts[i].y; }
   return { x:sx/w.pts.length, y:sy/w.pts.length };
 }
-function place(p,w,c){
-  if (!w.rot && w.scale===1 && !w.tx && !w.ty) return p;
+function place(p,w,c,still){
+  var tx = still ? w.tx : effTx(w), ty = still ? w.ty : effTy(w);
+  var rot = still ? w.rot : effRot(w), k = still ? w.scale : effScale(w);
+  if (!rot && k===1 && !tx && !ty) return p;
   var px=(p.x-c.x)*W, py=(p.y-c.y)*H;
-  var a=w.rot*Math.PI/180, cs=Math.cos(a), sn=Math.sin(a), k=w.scale;
-  return { x: c.x + (px*cs-py*sn)*k/W + w.tx,
-           y: c.y + (px*sn+py*cs)*k/H + w.ty };
+  var a=rot*Math.PI/180, cs=Math.cos(a), sn=Math.sin(a);
+  return { x: c.x + (px*cs-py*sn)*k/W + tx,
+           y: c.y + (px*sn+py*cs)*k/H + ty };
 }
 function unplace(p,w,c){
   var dx=(p.x-c.x-w.tx)*W, dy=(p.y-c.y-w.ty)*H;
@@ -509,7 +532,7 @@ function viewPts(w){
 /* where the mark sits with the drift wound off — the position you drew */
 function restPts(w){
   var c=centre(w);
-  var out = w.pts.map(function(p){ return place(p,w,c); });
+  var out = w.pts.map(function(p){ return place(p,w,c,true); });
   return fitInside(out, w, 1);
 }
 
@@ -560,7 +583,7 @@ function shift(pt,i,w){
    passes settle it; the stored path is never touched, so this constrains
    what you see without editing what you drew. */
 function strokeRadius(w){
-  return w.wBase * R * effW(w) * w.scale / 2;
+  return w.wBase * R * effW(w) * effScale(w) / 2;
 }
 function polyline(pts, tight){
   return samplePath(pts, tight, 8).map(function(q){ return {x:q.x, y:q.y}; });
@@ -643,7 +666,7 @@ function keepApart(items, gap){
   }
   function widthOf(it){
     /* weight winds back with position, toward the width you set */
-    return lerp(effW(it.w), it.w.w, it.settle) * it.w.wBase * R * it.w.scale / 2;
+    return lerp(effW(it.w), it.w.w, it.settle) * it.w.wBase * R * effScale(it.w) / 2;
   }
 
   for (st=0; st<steps; st++){
@@ -671,6 +694,22 @@ function keepApart(items, gap){
     for (i=0;i<items.length;i++)
       if (clash[i] && items[i].settle < 1)
         items[i].settle = Math.min(1, items[i].settle + 1/steps);
+  }
+  /* One last look. Anything still touching goes all the way back to rest —
+     the drawn arrangement is known to be clear, so this always resolves
+     unless the marks were drawn crossing in the first place. */
+  var S2=[], i2, j2, k2, m2;
+  for (i2=0;i2<items.length;i2++) S2.push(samplePath(items[i2].pts, items[i2].w.tight, 6));
+  for (i2=0;i2<items.length;i2++){
+    for (j2=0;j2<items.length;j2++){
+      if (j2===i2 || items[i2].settle >= 1) continue;
+      var need2 = widthOf(items[i2]) + widthOf(items[j2]) + gap;
+      var touch=false;
+      for (k2=0;k2<S2[i2].length && !touch;k2++)
+        for (m2=1;m2<S2[j2].length;m2++)
+          if (pushOff(S2[i2][k2].x, S2[i2][k2].y, S2[j2][m2-1], S2[j2][m2]).d < need2){ touch=true; break; }
+      if (touch){ items[i2].settle = 1; items[i2].pts = items[i2].rest; }
+    }
   }
   for (i=0;i<items.length;i++){
     items[i].pts = shape(items[i]);
@@ -809,7 +848,7 @@ function drawRef(){
 }
 function lineStroke(pts,w,hue,squeeze){
   sheet.strokeStyle=hsv(hue,effSat(w),BRI);
-  sheet.lineWidth=w.wBase*R*effW(w)*w.scale*(squeeze==null?1:squeeze);
+  sheet.lineWidth=w.wBase*R*effW(w)*effScale(w)*(squeeze==null?1:squeeze);
   sheet.lineCap='round'; sheet.lineJoin='round';
   tracePath(sheet,pts,w.tight);
   sheet.stroke();
@@ -819,7 +858,7 @@ function lineStroke(pts,w,hue,squeeze){
    the curve turns hardest — the way a brush does through a corner. */
 function brushStroke(pts,w,hue,squeeze){
   var pad=[pts[0]].concat(pts,[pts[pts.length-1]]);
-  var base=w.wBase*R*effW(w)*w.scale*(squeeze==null?1:squeeze);
+  var base=w.wBase*R*effW(w)*effScale(w)*(squeeze==null?1:squeeze);
   var segs=pad.length-3, steps=40, i, k;
   var s=[];
   for (i=0;i<segs;i++)
@@ -877,7 +916,9 @@ function moving(){
     if (!vis(l)) return false;
     if (l.ground.show && l.ground.opDrift>0) return true;
     return l.wiggles.some(function(w){
-      return w.show && (w.drift>0 || w.satDrift>0 || w.wDrift>0);
+      return w.show && (w.drift>0 || w.wDrift>0 ||
+        (w.satLo!=null && w.satHi!=null && w.satHi>w.satLo) ||
+        w.tDrift>0 || w.rDrift>0 || w.sDrift>0);
     });
   });
 }
@@ -1315,6 +1356,14 @@ function build(){
         function(v){ w.rot=v; refresh(); });
       slider(wb,'scale',0.05,3,0.01,w.scale,function(v){return v.toFixed(2)+'x';},
         function(v){ w.scale=v; refresh(); });
+      slider(wb,'drift position',0,1,0.01,w.tDrift||0,function(v){return v.toFixed(2);},
+        function(v){ w.tDrift=v; refresh(); });
+      slider(wb,'drift rotation',0,1,0.01,w.rDrift||0,function(v){return v.toFixed(2);},
+        function(v){ w.rDrift=v; refresh(); });
+      slider(wb,'drift scale',0,1,0.01,w.sDrift||0,function(v){return v.toFixed(2);},
+        function(v){ w.sDrift=v; refresh(); });
+      slider(wb,'transform drift speed',0.05,4,0.05,w.tSpeed||1,
+        function(v){return v.toFixed(2)+'x';}, function(v){ w.tSpeed=v; refresh(); });
       slider(wb,'drift',0,1,0.01,w.drift,function(v){return v.toFixed(2);},
         function(v){ w.drift=v; refresh(); });
       slider(wb,'drift speed',0.05,4,0.05,w.speed,function(v){return v.toFixed(2)+'x';},
@@ -1642,6 +1691,7 @@ function buildViewer(){
             satLo:(w.satLo==null?w.sat:w.satLo), satHi:(w.satHi==null?w.sat:w.satHi),
             satSpeed:w.satSpeed||1,
             wDrift:w.wDrift||0, wSpeed:w.wSpeed||1,
+            tDrift:w.tDrift||0, rDrift:w.rDrift||0, sDrift:w.sDrift||0, tSpeed:w.tSpeed||1,
             drift:w.drift, speed:w.speed, show:w.show,
             brush:w.brush, load:w.load, swell:w.swell, bite:w.bite,
             pts:w.pts.map(function(p){ return {x:+p.x.toFixed(4), y:+p.y.toFixed(4)}; }) };
@@ -1649,7 +1699,8 @@ function buildViewer(){
     }) };
 
   var fns=[clamp,lerp,hash2,noise2,hsv,catmull,tracePath,shift,
-    centre,place,strokeRadius,reinIn,samplePath,fitInside,viewPts,restPts,
+    centre,effTx,effTy,effRot,effScale,place,strokeRadius,reinIn,samplePath,
+    fitInside,viewPts,restPts,
     effSat,effW,effOp,boundsOf,boxesMiss,pushOff,keepApart,
     lineStroke,brushStroke]
     .map(function(f){ return f.toString(); }).join('\n');
@@ -1894,6 +1945,7 @@ function projectData(){
             satLo:(w.satLo==null?w.sat:w.satLo), satHi:(w.satHi==null?w.sat:w.satHi),
             satSpeed:w.satSpeed||1,
             wDrift:w.wDrift||0, wSpeed:w.wSpeed||1,
+            tDrift:w.tDrift||0, rDrift:w.rDrift||0, sDrift:w.sDrift||0, tSpeed:w.tSpeed||1,
             drift:w.drift||0, speed:w.speed||1,
             brush:!!w.brush, load:w.load, swell:w.swell, bite:w.bite,
             n:w.n, maxN:w.maxN, grow:w.grow||'both', reach:w.reach||0.08,
@@ -1986,6 +2038,7 @@ function loadProject(text, quiet){
       var w = newWiggle(0);
       var keys = ['sat','w','wBase','tight','tx','ty','rot','scale',
                   'satLo','satHi','satSpeed','wDrift','wSpeed','drift','speed',
+                  'tDrift','rDrift','sDrift','tSpeed',
                   'load','swell','bite','n','maxN','grow','reach','seedLen'];
       keys.forEach(function(k){ if (Wg[k] !== undefined) w[k] = Wg[k]; });
       w.brush = !!Wg.brush;
