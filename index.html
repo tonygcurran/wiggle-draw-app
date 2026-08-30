@@ -181,6 +181,23 @@ var sepGap = 6, sepThin = true, sepThinnest = 0.3;
    reach. Individual frames still run as dark or as light as they like;
    only the bias is removed. */
 var lightGuard = true, lightPull = 0.5;
+/* The noise is deterministic, so a piece replays identically every time
+   unless it is started somewhere else along the sequence. */
+var freshStart = true;
+
+/* One set of drift settings for the whole piece. Any ground or wiggle can
+   break away with its own, but most of the time everything is meant to
+   move together. */
+var G = {
+  drift:0, speed:1,                       /* anchors */
+  satLo:50, satHi:50, satSpeed:1,         /* wiggle saturation */
+  wDrift:0, wSpeed:1,                     /* wiggle weight */
+  tDrift:0, rDrift:0, sDrift:0, tSpeed:1, /* position, turn, size */
+  opLo:0.5, opHi:0.5, opSpeed:1           /* ground opacity */
+};
+/* read a drift setting: the element's own if it has broken away,
+   otherwise the shared one */
+function dv(o, key){ return o && o.own ? o[key] : G[key]; }
 var lightMin = 50, lightMax = 700;      /* hard floor and ceiling, R+G+B */
 var groundTrim = 1, lumaAvg = null;
 /* The reference is layer 1: the surface everything else is painted onto,
@@ -569,10 +586,11 @@ function effOp(g){
 }
 
 function shift(pt,i,w){
-  if (!w.drift) return pt;
-  var s=w.id*37, u=t*(w.speed||1);
-  return { x: pt.x+(noise2(s+i,u)-0.5)*0.22*w.drift,
-           y: pt.y+(noise2(s+i+99,u)-0.5)*0.22*w.drift };
+  var d = dv(w,'drift');
+  if (!d) return pt;
+  var s=w.id*37, u=t*(dv(w,'speed')||1);
+  return { x: pt.x+(noise2(s+i,u)-0.5)*0.22*d,
+           y: pt.y+(noise2(s+i+99,u)-0.5)*0.22*d };
 }
 
 /* ---------- keeping wiggles off each other ----------
@@ -647,6 +665,9 @@ function pushOff(px, py, a, b){
    Two marks drawn crossing each other will still cross. Nothing here can
    fix that, and it shouldn't: the rule protects your drawing from the
    drift, not from you. */
+/* How far a crowded mark may be shrunk before it gives up. 1 means never. */
+var tightFloor = 0.75;
+
 function keepApart(items, gap){
   var steps=8, i, j, k, m, st;
   for (i=0;i<items.length;i++){
@@ -714,6 +735,59 @@ function keepApart(items, gap){
   for (i=0;i<items.length;i++){
     items[i].pts = shape(items[i]);
     items[i].squeeze = lerp(effW(items[i].w), items[i].w.w, items[i].settle) / effW(items[i].w);
+    if (items[i].shrink === undefined) items[i].shrink = 1;
+  }
+
+  /* Last resort. Anything still touching at full rest was drawn that way,
+     so winding the drift back cannot help. Shrink the pair a little —
+     scale is the useful lever here, since it pulls a mark in along its
+     whole length, where sliding a long meandering curve barely helps —
+     and give them a small push apart as well. Display only: the stored
+     transform is untouched, so turning the rule off restores exactly
+     what you drew. */
+  if (tightFloor < 1){
+    var tries, ii, jj, kk, mm;
+    for (tries=0; tries<10; tries++){
+      var Sx=[], eased=false;
+      for (ii=0;ii<items.length;ii++)
+        Sx.push(samplePath(items[ii].pts, items[ii].w.tight, 6));
+      for (ii=0;ii<items.length;ii++){
+        for (jj=ii+1;jj<items.length;jj++){
+          var needX = widthOf(items[ii])*items[ii].shrink
+                    + widthOf(items[jj])*items[jj].shrink + gap;
+          var closest=null;
+          for (kk=0;kk<Sx[ii].length;kk++){
+            for (mm=1;mm<Sx[jj].length;mm++){
+              var h=pushOff(Sx[ii][kk].x, Sx[ii][kk].y, Sx[jj][mm-1], Sx[jj][mm]);
+              if (!closest || h.d < closest.d) closest=h;
+            }
+          }
+          if (!closest || closest.d >= needX) continue;
+          var canI = items[ii].shrink > tightFloor, canJ = items[jj].shrink > tightFloor;
+          if (canI) items[ii].shrink = Math.max(tightFloor, items[ii].shrink - 0.04);
+          if (canJ) items[jj].shrink = Math.max(tightFloor, items[jj].shrink - 0.04);
+          if (canI || canJ) eased = true;
+          /* a small nudge apart to go with it */
+          var gapShort = (needX - closest.d) * 0.15;
+          var sg = closest.d > 1e-6 ? 1 : (ii < jj ? 1 : -1);
+          slideBy(items[ii],  closest.nx*gapShort*sg,  closest.ny*gapShort*sg);
+          slideBy(items[jj], -closest.nx*gapShort*sg, -closest.ny*gapShort*sg);
+          eased = true;
+        }
+      }
+      if (!eased) break;
+    }
+    /* fold the shrink into the drawn shape, about each mark's own centre */
+    for (i=0;i<items.length;i++){
+      if (items[i].shrink >= 0.999) continue;
+      var c2 = centreOf(samplePath(items[i].pts, items[i].w.tight, 4));
+      var k2 = items[i].shrink, out2=[];
+      for (var q2=0;q2<items[i].pts.length;q2++)
+        out2.push({ x: (c2.x + (items[i].pts[q2].x*W - c2.x)*k2)/W,
+                    y: (c2.y + (items[i].pts[q2].y*H - c2.y)*k2)/H });
+      items[i].pts = fitInside(out2, items[i].w, items[i].squeeze*k2);
+      items[i].squeeze *= k2;
+    }
   }
   return items;
 }
@@ -728,6 +802,7 @@ function slideBy(item, dx, dy){
     out.push({ x: item.pts[k].x + dx/W, y: item.pts[k].y + dy/H });
   item.pts = fitInside(out, item.w, item.squeeze);
 }
+
 
 /* ---------- drawing ---------- */
 function render(){
@@ -914,11 +989,11 @@ function drawAnchors(){
 function moving(){
   return layers.some(function(l){
     if (!vis(l)) return false;
-    if (l.ground.show && l.ground.opDrift>0) return true;
+    if (l.ground.show && dv(l.ground,'opHi') > dv(l.ground,'opLo')) return true;
     return l.wiggles.some(function(w){
-      return w.show && (w.drift>0 || w.wDrift>0 ||
-        (w.satLo!=null && w.satHi!=null && w.satHi>w.satLo) ||
-        w.tDrift>0 || w.rDrift>0 || w.sDrift>0);
+      return w.show && (dv(w,'drift')>0 || dv(w,'wDrift')>0 ||
+        dv(w,'satHi') > dv(w,'satLo') ||
+        dv(w,'tDrift')>0 || dv(w,'rDrift')>0 || dv(w,'sDrift')>0);
     });
   });
 }
@@ -1192,6 +1267,62 @@ function section(host,title,colFn,open,o){
 }
 
 /* ---------- panels ---------- */
+/* One block of drift controls, pointed at either the shared settings or
+   an element's own. `full` shows the ground opacity range too. */
+function driftControls(host, o, full){
+  slider(host,'anchors',0,1,0.01,o.drift||0,function(v){return v.toFixed(2);},
+    function(v){ o.drift=v; refresh(); });
+  slider(host,'anchor speed',0.05,4,0.05,o.speed||1,function(v){return v.toFixed(2)+'x';},
+    function(v){ o.speed=v; refresh(); });
+  var a1,a2;
+  a1 = slider(host,'saturation from',0,100,1,o.satLo==null?50:o.satLo,
+    function(v){return v.toFixed(0);},
+    function(v){ o.satLo=v; if (o.satHi<v){ o.satHi=v; a2.value=v; } refresh(); });
+  a2 = slider(host,'saturation to',0,100,1,o.satHi==null?50:o.satHi,
+    function(v){return v.toFixed(0);},
+    function(v){ o.satHi=v; if (o.satLo>v){ o.satLo=v; a1.value=v; } refresh(); });
+  slider(host,'saturation speed',0.05,4,0.05,o.satSpeed||1,function(v){return v.toFixed(2)+'x';},
+    function(v){ o.satSpeed=v; refresh(); });
+  slider(host,'weight',0,1,0.01,o.wDrift||0,function(v){return v.toFixed(2);},
+    function(v){ o.wDrift=v; refresh(); });
+  slider(host,'weight speed',0.05,4,0.05,o.wSpeed||1,function(v){return v.toFixed(2)+'x';},
+    function(v){ o.wSpeed=v; refresh(); });
+  slider(host,'position',0,1,0.01,o.tDrift||0,function(v){return v.toFixed(2);},
+    function(v){ o.tDrift=v; refresh(); });
+  slider(host,'rotation',0,1,0.01,o.rDrift||0,function(v){return v.toFixed(2);},
+    function(v){ o.rDrift=v; refresh(); });
+  slider(host,'size',0,1,0.01,o.sDrift||0,function(v){return v.toFixed(2);},
+    function(v){ o.sDrift=v; refresh(); });
+  slider(host,'position, turn and size speed',0.05,4,0.05,o.tSpeed||1,
+    function(v){return v.toFixed(2)+'x';}, function(v){ o.tSpeed=v; refresh(); });
+  if (full){
+    var b1,b2;
+    b1 = slider(host,'ground opacity from',0,1,0.01,o.opLo==null?0.5:o.opLo,
+      function(v){return v.toFixed(2);},
+      function(v){ o.opLo=v; if (o.opHi<v){ o.opHi=v; b2.value=v; } refresh(); });
+    b2 = slider(host,'ground opacity to',0,1,0.01,o.opHi==null?0.5:o.opHi,
+      function(v){return v.toFixed(2);},
+      function(v){ o.opHi=v; if (o.opLo>v){ o.opLo=v; b1.value=v; } refresh(); });
+    slider(host,'ground opacity speed',0.05,4,0.05,o.opSpeed||1,
+      function(v){return v.toFixed(2)+'x';}, function(v){ o.opSpeed=v; refresh(); });
+  }
+}
+
+/* the break-away switch an element carries */
+function ownDrift(host, o, full){
+  check(host,'own drift settings',!!o.own,function(v){
+    if (v){
+      /* start from whatever the shared settings are, so nothing jumps */
+      ['drift','speed','satLo','satHi','satSpeed','wDrift','wSpeed',
+       'tDrift','rDrift','sDrift','tSpeed','opLo','opHi','opSpeed'].forEach(function(k){
+        if (o[k] == null) o[k] = G[k];
+      });
+    }
+    o.own = v; build(); refresh();
+  });
+  if (o.own) driftControls(host, o, full);
+}
+
 function build(){
   var host=el.panels;
   host.innerHTML='';
@@ -1260,9 +1391,21 @@ function build(){
     function(v){ hueStep=v; refresh(); });
   picker(nb,'blend mode',MODES,newBlend,function(v){ newBlend=v; });
 
+  var db=section(host,'Drift \u2014 everything',function(){return '#EFEDE4';},false);
+  driftControls(db, G, true);
+  var dh=document.createElement('p'); dh.className='hint';
+  dh.textContent='These govern every ground and wiggle. Any one of them can break '+
+    'away with its own settings from inside its own panel.';
+  db.appendChild(dh);
+  check(db,'start somewhere new each time it loads',freshStart,
+    function(v){ freshStart=v; });
+
   var sb=section(host,'Stroke spacing',function(){return '#EFEDE4';},false);
   slider(sb,'gap between strokes, px',0,40,1,sepGap,
     function(v){return v.toFixed(0)+'px';}, function(v){ sepGap=v; refresh(); });
+  slider(sb,'crowded marks may shrink to',0.4,1,0.01,tightFloor,
+    function(v){return v>=0.999?'not at all':Math.round(v*100)+'%';},
+    function(v){ tightFloor=v; refresh(); });
 
 
   var sh=document.createElement('p'); sh.className='hint';
@@ -1305,19 +1448,7 @@ function build(){
       onToggle:function(o){ g.open=o; },
       isOff:function(){ return !g.show; }
     });
-    var gLo, gHi;
-    gLo = slider(gb,'opacity from',0,1,0.01,g.opLo==null?g.opacity:g.opLo,
-      function(v){return v.toFixed(2);},
-      function(v){ g.opLo=v; if (g.opHi<v){ g.opHi=v; gHi.value=v; } refresh(); });
-    gHi = slider(gb,'opacity to',0,1,0.01,g.opHi==null?g.opacity:g.opHi,
-      function(v){return v.toFixed(2);},
-      function(v){ g.opHi=v; if (g.opLo>v){ g.opLo=v; gLo.value=v; } refresh(); });
-    slider(gb,'drift speed',0.05,4,0.05,g.opSpeed||1,function(v){return v.toFixed(2)+'x';},
-      function(v){ g.opSpeed=v; refresh(); });
-    var gh2=document.createElement('p'); gh2.className='hint';
-    gh2.textContent='Set both the same for a still ground. Apart, the opacity '+
-      'wanders between them \u2014 no bias, whatever the two values are.';
-    gb.appendChild(gh2);
+    ownDrift(gb, g, true);
     check(gb,'visible',g.show,function(v){ g.show=v; refresh(); });
     var gh=document.createElement('p'); gh.className='hint';
     gh.textContent='Full saturation always. At 1 the ground covers everything below it.';
@@ -1331,21 +1462,8 @@ function build(){
         isOn:function(){ return w.id===activeId; },
         isOff:function(){ return !w.show; }
       });
-      var sLo, sHi;
-      sLo = slider(wb,'saturation from',0,100,1,w.satLo==null?w.sat:w.satLo,
-        function(v){return v.toFixed(0);},
-        function(v){ w.satLo=v; if (w.satHi<v){ w.satHi=v; sHi.value=v; } refresh(); });
-      sHi = slider(wb,'saturation to',0,100,1,w.satHi==null?w.sat:w.satHi,
-        function(v){return v.toFixed(0);},
-        function(v){ w.satHi=v; if (w.satLo>v){ w.satLo=v; sLo.value=v; } refresh(); });
-      slider(wb,'saturation drift speed',0.05,4,0.05,w.satSpeed||1,
-        function(v){return v.toFixed(2)+'x';}, function(v){ w.satSpeed=v; refresh(); });
       slider(wb,'stroke weight',0.02,5,0.01,w.w,function(v){return v.toFixed(2)+'x';},
         function(v){ w.w=v; refresh(); });
-      slider(wb,'weight drift',0,1,0.01,w.wDrift||0,function(v){return v.toFixed(2);},
-        function(v){ w.wDrift=v; refresh(); });
-      slider(wb,'weight drift speed',0.05,4,0.05,w.wSpeed||1,
-        function(v){return v.toFixed(2)+'x';}, function(v){ w.wSpeed=v; refresh(); });
       slider(wb,'curve tightness',-2,1,0.01,w.tight,function(v){return v.toFixed(2);},
         function(v){ w.tight=v; refresh(); });
       slider(wb,'move across',-0.6,0.6,0.005,w.tx,function(v){return v.toFixed(3);},
@@ -1356,18 +1474,6 @@ function build(){
         function(v){ w.rot=v; refresh(); });
       slider(wb,'scale',0.05,3,0.01,w.scale,function(v){return v.toFixed(2)+'x';},
         function(v){ w.scale=v; refresh(); });
-      slider(wb,'drift position',0,1,0.01,w.tDrift||0,function(v){return v.toFixed(2);},
-        function(v){ w.tDrift=v; refresh(); });
-      slider(wb,'drift rotation',0,1,0.01,w.rDrift||0,function(v){return v.toFixed(2);},
-        function(v){ w.rDrift=v; refresh(); });
-      slider(wb,'drift scale',0,1,0.01,w.sDrift||0,function(v){return v.toFixed(2);},
-        function(v){ w.sDrift=v; refresh(); });
-      slider(wb,'transform drift speed',0.05,4,0.05,w.tSpeed||1,
-        function(v){return v.toFixed(2)+'x';}, function(v){ w.tSpeed=v; refresh(); });
-      slider(wb,'drift',0,1,0.01,w.drift,function(v){return v.toFixed(2);},
-        function(v){ w.drift=v; refresh(); });
-      slider(wb,'drift speed',0.05,4,0.05,w.speed,function(v){return v.toFixed(2)+'x';},
-        function(v){ w.speed=v; refresh(); });
 
       picker(wb,'anchors grow from',
         [['both','both ends, alternating'],['end','the end'],['start','the start'],
@@ -1379,6 +1485,7 @@ function build(){
       slider(wb,'anchors',3,Math.max(24, w.base.length + 8),1,w.n,
         function(v){return v.toFixed(0);},
         function(v){ setAnchors(w, v); refresh(); });
+      ownDrift(wb, w, false);
       check(wb,'visible',w.show,function(v){ w.show=v; refresh(); });
 
       if (layers.length > 1){
@@ -1701,7 +1808,7 @@ function buildViewer(){
   var fns=[clamp,lerp,hash2,noise2,hsv,catmull,tracePath,shift,
     centre,effTx,effTy,effRot,effScale,place,strokeRadius,reinIn,samplePath,
     fitInside,viewPts,restPts,
-    effSat,effW,rawOp,effOp,boundsOf,boxesMiss,pushOff,keepApart,
+    effSat,effW,rawOp,effOp,blendPair,groundLuma,measureLight,boundsOf,boxesMiss,pushOff,centreOf,slideBy,keepApart,
     lineStroke,brushStroke]
     .map(function(f){ return f.toString(); }).join('\n');
 
@@ -1725,8 +1832,14 @@ function buildViewer(){
     '</style></head><body>'+OPEN,
     'var BRI=100;',
     'var groundTrim=1;',
+    'var G=' + JSON.stringify(G) + ';',
+    'function dv(o,key){ return o && o.own ? o[key] : G[key]; }',
+    (freshStart ? 'var t=Math.random()*100000;' : 'var t=0;'),
     'var EDGE_PAD=' + EDGE_PAD + ';',
-    'var sepGap=' + sepGap + ';',
+    'var sepGap=' + sepGap + ', tightFloor=' + tightFloor + ';',
+    'var lightGuard=' + (lightGuard?'true':'false') + ', lightPull=' + lightPull + ';',
+    'var lightMin=' + lightMin + ', lightMax=' + lightMax + ', lumaAvg=null;',
+    'function vis(l){ return l.show; }',
     'var SEP=' + JSON.stringify({gap:sepGap}) + ';',
     (refImg && refShow ? 'var REF=new Image(); REF.src=' + JSON.stringify(refDataURL()) + ';'
                        : 'var REF=null;'),
@@ -1734,7 +1847,7 @@ function buildViewer(){
       ', REF_TOP=' + (refOnTop ? 'true' : 'false') + ';',
     'var STATE='+json+';',
     'var layers=STATE.layers;',
-    'var W=0,H=0,R=0,DPR=1,t=0,raf=null;',
+    'var W=0,H=0,R=0,DPR=1,raf=null;',
     'var cv=document.createElement("canvas"); document.body.appendChild(cv);',
     'var ctx=cv.getContext("2d");',
     'var sheetC=document.createElement("canvas"), sheet=sheetC.getContext("2d");',
@@ -1821,6 +1934,7 @@ function buildViewer(){
     '    ctx.globalCompositeOperation=l.blend; ctx.drawImage(sheetC,0,0,W,H); }',
     '  ctx.globalCompositeOperation="source-over";',
     '  if (REF_TOP) drawRef();',
+    '  measureLight();',
     '}',
     'if (REF) REF.onload = function(){ fit(); render(); };',
     'var moves=layers.some(function(l){ if(!l.show) return false;',
@@ -1932,11 +2046,12 @@ function projectData(){
     format:'wiggle-layers', version:PROJECT_VERSION,
     title: el.titleValue || 'Wiggle',
     cmW:cmW, cmH:cmH, hueStep:hueStep, spread:spread, newBlend:newBlend,
-    sepGap:sepGap, lightGuard:lightGuard, lightPull:lightPull,
+    sepGap:sepGap, tightFloor:tightFloor, lightGuard:lightGuard, lightPull:lightPull,
+    freshStart:freshStart, G:JSON.parse(JSON.stringify(G)),
     lightMin:lightMin, lightMax:lightMax,
     layers: layers.map(function(l){
       return { hue:l.hue, blend:l.blend, mute:!!l.mute, solo:!!l.solo, open:l.open,
-        ground:{ opacity:l.ground.opacity,
+        ground:{ own:!!l.ground.own, opacity:l.ground.opacity,
                  opLo:(l.ground.opLo==null?l.ground.opacity:l.ground.opLo),
                  opHi:(l.ground.opHi==null?l.ground.opacity:l.ground.opHi),
                  opSpeed:l.ground.opSpeed||1, seed:l.ground.seed||13,
@@ -1950,7 +2065,7 @@ function projectData(){
             tDrift:w.tDrift||0, rDrift:w.rDrift||0, sDrift:w.sDrift||0, tSpeed:w.tSpeed||1,
             drift:w.drift||0, speed:w.speed||1,
             brush:!!w.brush, load:w.load, swell:w.swell, bite:w.bite,
-            n:w.n, maxN:w.maxN, grow:w.grow||'both', reach:w.reach||0.08,
+            own:!!w.own, n:w.n, maxN:w.maxN, grow:w.grow||'both', reach:w.reach||0.08,
             seedLen:w.seedLen||3, show:w.show, open:w.open,
             base: w.base.map(function(p){ return [ +p.x.toFixed(5), +p.y.toFixed(5) ]; }),
             pts:  w.pts.map(function(p){  return [ +p.x.toFixed(5), +p.y.toFixed(5) ]; }) };
@@ -2018,8 +2133,15 @@ function loadProject(text, quiet){
   spread = pick(d.spread, 0.35);
   newBlend = pick(d.newBlend, 'multiply');
   sepGap = pick(d.sepGap, 6);
+  tightFloor = pick(d.tightFloor, 0.75);
   lightGuard = pick(d.lightGuard, true);
   lightPull = pick(d.lightPull, 0.5);
+  freshStart = pick(d.freshStart, true);
+  if (d.G) for (var gk in d.G) if (d.G[gk] != null) G[gk] = d.G[gk];
+  /* Files saved before the shared settings existed carry their drift on
+     each element. Mark those as broken away so they keep behaving the
+     way they were saved. */
+  var legacy = !d.G;
   lightMin = pick(d.lightMin, 50);
   lightMax = pick(d.lightMax, 700);
   groundTrim = 1; lumaAvg = null;
@@ -2028,14 +2150,15 @@ function loadProject(text, quiet){
   layers = d.layers.map(function(L){
     var l = newLayer(pick(L.hue,60), pick(L.blend,'source-over'));
     l.mute = !!L.mute; l.solo = !!L.solo; l.open = pick(L.open, true);
-    var G = L.ground || {};
-    l.ground.opacity = pick(G.opacity, 0.5);
-    l.ground.opLo = pick(G.opLo, pick(G.opacity, 0.5));
-    l.ground.opHi = pick(G.opHi, pick(G.opacity, 0.5));
-    l.ground.opSpeed = pick(G.opSpeed, 1);
-    l.ground.seed    = pick(G.seed, l.ground.seed);
-    l.ground.show    = pick(G.show, true);
-    l.ground.open    = pick(G.open, false);
+    var G_ = L.ground || {};
+    l.ground.opacity = pick(G_.opacity, 0.5);
+    l.ground.own = legacy ? true : !!G_.own;
+    l.ground.opLo = pick(G_.opLo, pick(G_.opacity, 0.5));
+    l.ground.opHi = pick(G_.opHi, pick(G_.opacity, 0.5));
+    l.ground.opSpeed = pick(G_.opSpeed, 1);
+    l.ground.seed    = pick(G_.seed, l.ground.seed);
+    l.ground.show    = pick(G_.show, true);
+    l.ground.open    = pick(G_.open, false);
     l.wiggles = (L.wiggles || []).map(function(Wg){
       var w = newWiggle(0);
       var keys = ['sat','w','wBase','tight','tx','ty','rot','scale',
@@ -2043,6 +2166,7 @@ function loadProject(text, quiet){
                   'tDrift','rDrift','sDrift','tSpeed',
                   'load','swell','bite','n','maxN','grow','reach','seedLen'];
       keys.forEach(function(k){ if (Wg[k] !== undefined) w[k] = Wg[k]; });
+      w.own = legacy ? true : !!Wg.own;
       w.brush = !!Wg.brush;
       w.show  = pick(Wg.show, true);
       w.open  = pick(Wg.open, false);
