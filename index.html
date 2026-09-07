@@ -93,6 +93,7 @@
   <div id="stage"><canvas id="cv" width="520" height="520"></canvas></div>
   <aside>
     <h1>Wiggle layers</h1>
+    <p class="hint" id="build" style="margin:-8px 0 12px"></p>
     <label class="chk"><input type="checkbox" id="pts"> anchors (active wiggle)</label>
     <label class="chk"><input type="checkbox" id="fs"> click canvas for fullscreen</label>
     <div id="panels"></div>
@@ -183,6 +184,10 @@ var sepGap = 6, sepThin = true, sepThinnest = 0.3;
 var lightGuard = true, lightPull = 0.5;
 /* The noise is deterministic, so a piece replays identically every time
    unless it is started somewhere else along the sequence. */
+/* Shown in the panel and stamped into every export, so there is never
+   any doubt about which version produced a file. */
+var BUILD = '2026-09-04 23:29';
+
 var freshStart = true;
 
 /* One set of drift settings for the whole piece. Any ground or wiggle can
@@ -283,7 +288,7 @@ function newWiggle(seed){
     n:base.length, maxN:60, grow:'both', reach:0.08, seedLen:base.length,
     sat:50, w:1, wBase:0.09, tight:0,
     tx:0, ty:0, rot:0, scale:1,
-    satLo:50, satHi:50, satSpeed:1, wDrift:0, wSpeed:1,
+    own:false, satLo:50, satHi:50, satSpeed:1, wDrift:0, wSpeed:1,
     tDrift:0, rDrift:0, sDrift:0, tSpeed:1,
     drift:0, speed:1, brush:false, load:0.35, swell:0.25, bite:0.30,
     show:true, open:true };
@@ -291,7 +296,7 @@ function newWiggle(seed){
 function newLayer(hue, blend){
   var id = ++uid;
   return { id:id, hue:hue, blend:blend||'source-over', mute:false, solo:false, open:true,
-    ground:{opacity:0.5, opLo:0.5, opHi:0.5, opSpeed:1, seed:id*13,
+    ground:{own:false, opacity:0.5, opLo:0.5, opHi:0.5, opSpeed:1, seed:id*13,
             show:true, open:false},
     wiggles:[] };
 }
@@ -1818,7 +1823,9 @@ function buildViewer(){
   return [
     '<!DOCTYPE html>','<html lang="en"><head><meta charset="utf-8">',
     '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">',
-    '<title>'+esc(title)+'</title>','<style>',
+    '<title>'+esc(title)+'</title>',
+    '<!-- wiggle-layers build ' + BUILD + ' -->',
+    '<style>',
     'html,body{margin:0;height:100%;background:#EFEDE4;overflow:hidden}',
     /* iOS only bubbles taps from elements that look interactive, so the
         whole body carries a pointer cursor */
@@ -2138,10 +2145,29 @@ function loadProject(text, quiet){
   lightPull = pick(d.lightPull, 0.5);
   freshStart = pick(d.freshStart, true);
   if (d.G) for (var gk in d.G) if (d.G[gk] != null) G[gk] = d.G[gk];
-  /* Files saved before the shared settings existed carry their drift on
-     each element. Mark those as broken away so they keep behaving the
-     way they were saved. */
+  /* Everything follows the shared settings unless it was explicitly set
+     apart. Older files carry drift on each element, so their values are
+     copied up into the shared set rather than pinning every element to
+     its own. */
   var legacy = !d.G;
+  if (legacy && d.layers && d.layers.length){
+    var seed = null;
+    d.layers.forEach(function(L){
+      (L.wiggles||[]).forEach(function(w){ if (!seed && w.drift) seed = w; });
+    });
+    if (seed){
+      ['drift','speed','satLo','satHi','satSpeed','wDrift','wSpeed',
+       'tDrift','rDrift','sDrift','tSpeed'].forEach(function(k){
+        if (seed[k] != null) G[k] = seed[k];
+      });
+    }
+    var g0 = d.layers[0] && d.layers[0].ground;
+    if (g0){
+      if (g0.opLo != null) G.opLo = g0.opLo;
+      if (g0.opHi != null) G.opHi = g0.opHi;
+      if (g0.opSpeed != null) G.opSpeed = g0.opSpeed;
+    }
+  }
   lightMin = pick(d.lightMin, 50);
   lightMax = pick(d.lightMax, 700);
   groundTrim = 1; lumaAvg = null;
@@ -2152,7 +2178,7 @@ function loadProject(text, quiet){
     l.mute = !!L.mute; l.solo = !!L.solo; l.open = pick(L.open, true);
     var G_ = L.ground || {};
     l.ground.opacity = pick(G_.opacity, 0.5);
-    l.ground.own = legacy ? true : !!G_.own;
+    l.ground.own = !!G_.own;
     l.ground.opLo = pick(G_.opLo, pick(G_.opacity, 0.5));
     l.ground.opHi = pick(G_.opHi, pick(G_.opacity, 0.5));
     l.ground.opSpeed = pick(G_.opSpeed, 1);
@@ -2166,7 +2192,7 @@ function loadProject(text, quiet){
                   'tDrift','rDrift','sDrift','tSpeed',
                   'load','swell','bite','n','maxN','grow','reach','seedLen'];
       keys.forEach(function(k){ if (Wg[k] !== undefined) w[k] = Wg[k]; });
-      w.own = legacy ? true : !!Wg.own;
+      w.own = !!Wg.own;
       w.brush = !!Wg.brush;
       w.show  = pick(Wg.show, true);
       w.open  = pick(Wg.open, false);
@@ -2342,6 +2368,8 @@ function boot(){
     if (e.key==='r'){ clearAutosave(); resetAll(); build(); refresh(); }
   });
 
+  var bd=document.getElementById('build');
+  if (bd) bd.textContent = 'build ' + BUILD;
   el.note.textContent='Open a wiggle to make it active, tick anchors, then drag its dots. '+
     'Tap the canvas to add one at the nearer end. Right-click an anchor to delete it, '+
     'or hold it down on a touch screen. Tapping toggles fullscreen instead while that '+
