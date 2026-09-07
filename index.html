@@ -189,6 +189,7 @@ var lightGuard = true, lightPull = 0.5;
 var BUILD = '2026-09-04 23:29';
 
 var freshStart = true;
+var driftOff = false;                   /* master stop: nothing moves */
 
 /* One set of drift settings for the whole piece. Any ground or wiggle can
    break away with its own, but most of the time everything is meant to
@@ -202,7 +203,14 @@ var G = {
 };
 /* read a drift setting: the element's own if it has broken away,
    otherwise the shared one */
-function dv(o, key){ return o && o.own ? o[key] : G[key]; }
+function dv(o, key){
+  if (driftOff){
+    if (key === 'satLo' || key === 'satHi') return null;
+    if (key === 'opLo'  || key === 'opHi')  return null;
+    return 0;
+  }
+  return o && o.own ? o[key] : G[key];
+}
 var lightMin = 50, lightMax = 700;      /* hard floor and ceiling, R+G+B */
 var groundTrim = 1, lumaAvg = null;
 /* The reference is layer 1: the surface everything else is painted onto,
@@ -447,20 +455,24 @@ function tracePath(x, pts, s){
    the settings you gave it. Symmetric around each value, so there is no
    pull in any direction. */
 function effTx(w){
-  if (!w.tDrift) return w.tx;
-  return w.tx + (noise2(w.id*61+5, t*(w.tSpeed||1)) - 0.5) * 0.6 * w.tDrift;
+  var d = dv(w,'tDrift');
+  if (!d) return w.tx;
+  return w.tx + (noise2(w.id*61+5, t*(dv(w,'tSpeed')||1)) - 0.5) * 0.6 * d;
 }
 function effTy(w){
-  if (!w.tDrift) return w.ty;
-  return w.ty + (noise2(w.id*61+77, t*(w.tSpeed||1)) - 0.5) * 0.6 * w.tDrift;
+  var d = dv(w,'tDrift');
+  if (!d) return w.ty;
+  return w.ty + (noise2(w.id*61+77, t*(dv(w,'tSpeed')||1)) - 0.5) * 0.6 * d;
 }
 function effRot(w){
-  if (!w.rDrift) return w.rot;
-  return w.rot + (noise2(w.id*83+13, t*(w.tSpeed||1)) - 0.5) * 360 * w.rDrift;
+  var d = dv(w,'rDrift');
+  if (!d) return w.rot;
+  return w.rot + (noise2(w.id*83+13, t*(dv(w,'tSpeed')||1)) - 0.5) * 360 * d;
 }
 function effScale(w){
-  if (!w.sDrift) return w.scale;
-  return Math.max(0.05, w.scale * (1 + (noise2(w.id*107+41, t*(w.tSpeed||1)) - 0.5) * 2 * w.sDrift));
+  var d = dv(w,'sDrift');
+  if (!d) return w.scale;
+  return Math.max(0.05, w.scale * (1 + (noise2(w.id*107+41, t*(dv(w,'tSpeed')||1)) - 0.5) * 2 * d));
 }
 
 /* Place, turn and size a wiggle without touching its anchors. The maths
@@ -567,24 +579,33 @@ function restPts(w){
    where it was set. A range cannot bias: the value simply wanders
    between the two ends you chose. */
 function effSat(w){
-  var lo = w.satLo == null ? w.sat : w.satLo;
-  var hi = w.satHi == null ? w.sat : w.satHi;
-  if (hi <= lo) return clamp(lo, 0, 100);
-  var n = noise2(w.id*53+7, t*(w.satSpeed||1));
-  return clamp(lo + n*(hi-lo), 0, 100);
+  if (driftOff) return clamp(w.sat, 0, 100);
+  var lo = dv(w,'satLo'), hi = dv(w,'satHi');
+  if (lo == null) lo = w.sat;
+  if (hi == null) hi = w.sat;
+  if (hi <= lo) return clamp(w.sat, 0, 100);
+  /* the range wanders around the saturation you set, rather than
+     replacing it — so the slider still means something while drifting */
+  var n = noise2(w.id*53+7, t*(dv(w,'satSpeed')||1));
+  var mid = (lo + hi)/2;
+  return clamp(w.sat + (lo + n*(hi-lo)) - mid, 0, 100);
 }
 /* weight drifts as a multiplier, so a thin mark stays thin in proportion */
 function effW(w){
-  if (!w.wDrift) return w.w;
-  var n = noise2(w.id*97+19, t*(w.wSpeed||1));
-  return Math.max(0.01, w.w * (1 + (n-0.5)*2*w.wDrift));
+  var d = dv(w,'wDrift');
+  if (!d) return w.w;
+  var n = noise2(w.id*97+19, t*(dv(w,'wSpeed')||1));
+  return Math.max(0.01, w.w * (1 + (n-0.5)*2*d));
 }
 function rawOp(g){
-  var lo = g.opLo == null ? g.opacity : g.opLo;
-  var hi = g.opHi == null ? g.opacity : g.opHi;
-  if (hi <= lo) return lo;
-  var n = noise2((g.seed||11)+31, t*(g.opSpeed||1));
-  return lo + n*(hi-lo);
+  if (driftOff) return g.opacity;
+  var lo = dv(g,'opLo'), hi = dv(g,'opHi');
+  if (lo == null) lo = g.opacity;
+  if (hi == null) hi = g.opacity;
+  if (hi <= lo) return g.opacity;
+  var n = noise2((g.seed||11)+31, t*(dv(g,'opSpeed')||1));
+  var mid = (lo + hi)/2;
+  return clamp(g.opacity + (lo + n*(hi-lo)) - mid, 0, 1);
 }
 function effOp(g){
   return clamp(rawOp(g) * groundTrim, 0, 1);
@@ -992,6 +1013,7 @@ function drawAnchors(){
   }
 }
 function moving(){
+  if (driftOff) return false;
   return layers.some(function(l){
     if (!vis(l)) return false;
     if (l.ground.show && dv(l.ground,'opHi') > dv(l.ground,'opLo')) return true;
@@ -1397,6 +1419,14 @@ function build(){
   picker(nb,'blend mode',MODES,newBlend,function(v){ newBlend=v; });
 
   var db=section(host,'Drift \u2014 everything',function(){return '#EFEDE4';},false);
+  check(db,'hold everything still',driftOff,function(v){
+    driftOff=v; groundTrim=1; lumaAvg=null; refresh();
+  });
+  var dh0=document.createElement('p'); dh0.className='hint';
+  dh0.textContent='Stops all movement and returns every mark to the position, '+
+    'saturation, weight and ground opacity you set. Nothing is lost \u2014 '+
+    'untick and it sets off again.';
+  db.appendChild(dh0);
   driftControls(db, G, true);
   var dh=document.createElement('p'); dh.className='hint';
   dh.textContent='These govern every ground and wiggle. Any one of them can break '+
@@ -1453,6 +1483,8 @@ function build(){
       onToggle:function(o){ g.open=o; },
       isOff:function(){ return !g.show; }
     });
+    slider(gb,'opacity',0,1,0.01,g.opacity,function(v){return v.toFixed(2);},
+      function(v){ g.opacity=v; refresh(); });
     ownDrift(gb, g, true);
     check(gb,'visible',g.show,function(v){ g.show=v; refresh(); });
     var gh=document.createElement('p'); gh.className='hint';
@@ -1467,6 +1499,8 @@ function build(){
         isOn:function(){ return w.id===activeId; },
         isOff:function(){ return !w.show; }
       });
+      slider(wb,'saturation',0,100,1,w.sat,function(v){return v.toFixed(0);},
+        function(v){ w.sat=v; refresh(); });
       slider(wb,'stroke weight',0.02,5,0.01,w.w,function(v){return v.toFixed(2)+'x';},
         function(v){ w.w=v; refresh(); });
       slider(wb,'curve tightness',-2,1,0.01,w.tight,function(v){return v.toFixed(2);},
@@ -1840,7 +1874,13 @@ function buildViewer(){
     'var BRI=100;',
     'var groundTrim=1;',
     'var G=' + JSON.stringify(G) + ';',
-    'function dv(o,key){ return o && o.own ? o[key] : G[key]; }',
+    'var driftOff=' + (driftOff?'true':'false') + ';',
+    'function dv(o,key){',
+    '  if (driftOff){',
+    '    if (key==="satLo"||key==="satHi") return null;',
+    '    if (key==="opLo"||key==="opHi") return null;',
+    '    return 0; }',
+    '  return o && o.own ? o[key] : G[key]; }',
     (freshStart ? 'var t=Math.random()*100000;' : 'var t=0;'),
     'var EDGE_PAD=' + EDGE_PAD + ';',
     'var sepGap=' + sepGap + ', tightFloor=' + tightFloor + ';',
@@ -2054,7 +2094,7 @@ function projectData(){
     title: el.titleValue || 'Wiggle',
     cmW:cmW, cmH:cmH, hueStep:hueStep, spread:spread, newBlend:newBlend,
     sepGap:sepGap, tightFloor:tightFloor, lightGuard:lightGuard, lightPull:lightPull,
-    freshStart:freshStart, G:JSON.parse(JSON.stringify(G)),
+    freshStart:freshStart, driftOff:driftOff, G:JSON.parse(JSON.stringify(G)),
     lightMin:lightMin, lightMax:lightMax,
     layers: layers.map(function(l){
       return { hue:l.hue, blend:l.blend, mute:!!l.mute, solo:!!l.solo, open:l.open,
@@ -2144,6 +2184,7 @@ function loadProject(text, quiet){
   lightGuard = pick(d.lightGuard, true);
   lightPull = pick(d.lightPull, 0.5);
   freshStart = pick(d.freshStart, true);
+  driftOff = pick(d.driftOff, false);
   if (d.G) for (var gk in d.G) if (d.G[gk] != null) G[gk] = d.G[gk];
   /* Everything follows the shared settings unless it was explicitly set
      apart. Older files carry drift on each element, so their values are
