@@ -913,7 +913,7 @@ function groundLuma(trim, atMax){
    middle of the range they can reach. Slow, so single frames are free
    to go anywhere. */
 function measureLight(){
-  if (!lightGuard){ groundTrim = 1; lumaAvg = null; return; }
+  if (!lightGuard || driftOff){ groundTrim = 1; lumaAvg = null; return; }
   var now = groundLuma(groundTrim);
   lumaAvg = (lumaAvg == null) ? now : lumaAvg + (now - lumaAvg)*0.01;
   /* the darkest the grounds could ever be, so the midpoint holds still
@@ -1027,6 +1027,10 @@ function moving(){
 function tick(){ t+=0.012; render(); raf=requestAnimationFrame(tick); }
 function refresh(){
   if (el.clearSolo) el.clearSolo.style.display = anySolo() ? 'block' : 'none';
+  var tr = document.getElementById('trimRead');
+  if (tr) tr.textContent = (lightGuard && !driftOff)
+    ? 'grounds currently drawing at ' + Math.round(groundTrim*100) + '% of their set opacity'
+    : 'grounds drawing exactly as set';
   queueSave();
   var ds=document.querySelectorAll('#panels details');
   for (var i=0;i<ds.length;i++) if (ds[i]._paint) ds[i]._paint();
@@ -1484,7 +1488,7 @@ function build(){
       isOff:function(){ return !g.show; }
     });
     slider(gb,'opacity',0,1,0.01,g.opacity,function(v){return v.toFixed(2);},
-      function(v){ g.opacity=v; refresh(); });
+      function(v){ g.opacity=v; groundTrim=1; lumaAvg=null; refresh(); });
     ownDrift(gb, g, true);
     check(gb,'visible',g.show,function(v){ g.show=v; refresh(); });
     var gh=document.createElement('p'); gh.className='hint';
@@ -1600,7 +1604,16 @@ function buildGroundRange(host){
   gHiS = slider(lb2,'lightest, R+G+B',0,765,5,lightMax,function(v){return v.toFixed(0);},
     function(v){ lightMax=v; if (lightMin>v){ lightMin=v; gLoS.value=v; } refresh(); });
   check(lb2,'no bias toward dark or light',lightGuard,
-    function(v){ lightGuard=v; groundTrim=1; lumaAvg=null; refresh(); });
+    function(v){ lightGuard=v; groundTrim=1; lumaAvg=null; build(); refresh(); });
+  var tr=document.createElement('p'); tr.className='hint';
+  tr.id='trimRead';
+  tr.textContent = lightGuard
+    ? 'grounds currently drawing at ' + Math.round(groundTrim*100) + '% of their set opacity'
+    : 'grounds drawing exactly as set';
+  lb2.appendChild(tr);
+  btn(lb2,'Back to the opacities I set',function(){
+    groundTrim=1; lumaAvg=null; refresh();
+  });
   slider(lb2,'how firmly',0,1,0.05,lightPull,function(v){return v.toFixed(2);},
     function(v){ lightPull=v; refresh(); });
   var lh=document.createElement('p'); lh.className='hint';
