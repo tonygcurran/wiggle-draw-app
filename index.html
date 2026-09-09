@@ -1997,11 +1997,17 @@ function buildViewer(){
     '  measureLight();',
     '}',
     'if (REF) REF.onload = function(){ fit(); render(); };',
-    'var moves=layers.some(function(l){ if(!l.show) return false;',
-    '  if (l.ground.show && l.ground.opDrift>0) return true;',
+    /* Ask the same question the editor asks, through dv, so drift held in
+       the shared settings counts. The old form named fields that no
+       longer exist, so an exported piece simply never animated. */
+    'var moves = !driftOff && layers.some(function(l){',
+    '  if (!l.show) return false;',
+    '  if (l.ground.show && dv(l.ground,"opHi") > dv(l.ground,"opLo")) return true;',
     '  return l.wiggles.some(function(w){',
-    '    return w.show && (w.drift>0||w.satDrift>0||w.wDrift>0); }); }) &&',
-    '  !(window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches);',
+    '    return w.show && (dv(w,"drift")>0 || dv(w,"wDrift")>0 ||',
+    '      dv(w,"satHi") > dv(w,"satLo") ||',
+    '      dv(w,"tDrift")>0 || dv(w,"rDrift")>0 || dv(w,"sDrift")>0); });',
+    '}) && !(window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches);',
     'function tick(){ t+=0.012; render(); raf=requestAnimationFrame(tick); }',
     'addEventListener("resize", function(){ fit(); render(); });',
     'addEventListener("orientationchange", function(){',
