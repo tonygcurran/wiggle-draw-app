@@ -14,7 +14,8 @@
   #wrap{display:flex;flex-direction:row;align-items:stretch;height:100vh;overflow:hidden}
   #stage{flex:1;min-width:0;padding:20px;display:flex;align-items:center;justify-content:center}
   canvas{display:block;margin:0 auto;max-width:100%;background:#EFEDE4;
-    box-shadow:0 12px 34px rgba(0,0,0,.16);touch-action:manipulation}
+    box-shadow:0 12px 34px rgba(0,0,0,.16);touch-action:manipulation;
+    -webkit-touch-callout:none;-webkit-user-select:none;user-select:none}
   canvas.editing{touch-action:none}
   aside{width:290px;flex:0 0 290px;background:var(--panel);
     border-left:1px solid var(--hair);padding:20px 16px;
@@ -37,6 +38,12 @@
   details details>summary{font-size:11px}
   .sw{width:12px;height:12px;flex:none;border:1px solid rgba(36,33,24,.45)}
   .sw.line{border-radius:50%}
+  /* the kind of layer, at a glance: a plain square for one hue, a colour
+     wheel for free colour, a band of spectrum for a gradient */
+  .sw.hsb{border-radius:50%;
+    background-image:conic-gradient(red,yellow,lime,cyan,blue,magenta,red) !important}
+  .sw.grad{border-radius:2px;
+    background-image:linear-gradient(90deg,red,yellow,lime,cyan,blue,magenta) !important}
   .tag{font-size:10px;display:none}
   .on>summary .tag{display:inline}
   .off>summary{opacity:.4}
@@ -46,6 +53,11 @@
     border:1px solid var(--hair);cursor:pointer;user-select:none;-webkit-user-select:none}
   .tog span.on{background:var(--ink);color:var(--panel);border-color:var(--ink)}
   summary::after{margin-left:6px}
+  .wheelWrap{display:flex;gap:10px;align-items:center;margin:2px 0 10px}
+  .wheel{width:104px;height:104px;flex:none;border-radius:50%;cursor:crosshair;
+    touch-action:none;box-shadow:0 1px 4px rgba(36,33,24,.25)}
+  .wheelSide{flex:1;min-width:0}
+  .wheelSwatch{width:100%;height:20px;border:1px solid var(--hair);margin-bottom:6px}
   .pal{display:flex;gap:6px;margin:0 0 12px}
   .pal button{flex:1;height:26px;padding:0;margin:0;border:1px solid var(--hair)}
   .pal button.sel{outline:2px solid var(--ink);outline-offset:1px}
@@ -59,6 +71,13 @@
     background:transparent;border:1px solid var(--hair);color:var(--ink);padding:6px}
   #fault{display:none;position:fixed;left:0;right:0;top:0;z-index:99;padding:12px 14px;
     background:#F5E2DE;border-bottom:1px solid var(--hair);font-size:12px}
+  #hide{position:fixed;right:10px;top:10px;z-index:60;width:auto;margin:0;
+    padding:7px 11px;background:var(--panel);opacity:.85;font-size:11px}
+  #hide:hover{opacity:1}
+  body.bare aside{display:none}
+  body.bare #wrap{display:block;height:100vh;overflow:hidden}
+  body.bare #stage{position:fixed;left:0;right:0;top:0;bottom:0;padding:0;
+    display:flex;align-items:center;justify-content:center}
   /* fullscreen preview: the controls step aside, the work sits on black */
   body.full{background:#000}
   body.full aside{display:none}
@@ -89,6 +108,7 @@
 <body>
 <div id="fault"></div>
 <div id="fsTip">click to exit</div>
+<button id="hide" type="button">hide panel</button>
 <div id="wrap">
   <div id="stage"><canvas id="cv" width="520" height="520"></canvas></div>
   <aside>
@@ -221,6 +241,9 @@ var refBlend = 'source-over';
 var lastDoc = null, lastName = 'wiggle.html';
 var COARSE = false, HIT = 14, DOT = 8;
 var isFull = false, downAt = null, moved = false, holdTimer = null;
+var drawing = null;        /* the stroke being drawn, in canvas pixels */
+var holdFrom = null;       /* where a press-and-hold began */
+var armLayer = null;       /* a layer waiting for its first stroke */
 var el = {};
 
 /* ---------- maths ---------- */
@@ -296,6 +319,9 @@ function newWiggle(seed){
     n:base.length, maxN:60, grow:'both', reach:0.08, seedLen:base.length,
     sat:50, w:1, wBase:0.09, tight:0,
     tx:0, ty:0, rot:0, scale:1,
+    curve:'catmull', anim:'drift', growSpeed:0.25, growHold:0.2,
+    hue:null, bri:100,                /* set on an hsb layer; null follows the layer */
+    alpha:1, grad:false, gradSpread:1, gradShift:0, gradCycles:1,
     own:false, satLo:50, satHi:50, satSpeed:1, wDrift:0, wSpeed:1,
     tDrift:0, rDrift:0, sDrift:0, tSpeed:1,
     drift:0, speed:1, brush:false, load:0.35, swell:0.25, bite:0.30,
@@ -303,8 +329,13 @@ function newWiggle(seed){
 }
 function newLayer(hue, blend){
   var id = ++uid;
-  return { id:id, hue:hue, blend:blend||'source-over', mute:false, solo:false, open:true,
+  return { id:id, hue:hue, blend:blend||'source-over', alpha:1,
+    kind:'paint',       /* 'paint' one hue, 'gradient' a field, 'hsb' free colour */
+    gAngle:0, gSpread:1, gShift:0, gCycles:1,
+    aOn:false, aAngle:90, aFrom:1, aTo:0, aCycles:1,
+    mute:false, solo:false, open:true,
     ground:{own:false, opacity:0.5, opLo:0.5, opHi:0.5, opSpeed:1, seed:id*13,
+            hue:hue, sat:100, bri:100,        /* an hsb layer's own colour */
             show:true, open:false},
     wiggles:[] };
 }
@@ -439,15 +470,81 @@ function catmull(p0,p1,p2,p3,u,s){
   return { x:h00*p1.x+h10*m1x+h01*p2.x+h11*m2x, y:h00*p1.y+h10*m1y+h01*p2.y+h11*m2y };
 }
 /* Catmull-Rom to cubic Bezier, one segment per pair of anchors. */
-function tracePath(x, pts, s){
-  var pad=[pts[0]].concat(pts,[pts[pts.length-1]]), f=(1-s)/2;
+/* Six ways of joining the same anchors. The points never change — only
+   the rule for what happens between them — so a mark can be tried as a
+   flowing spline, a taut polygon or a series of right-angle steps
+   without redrawing anything. */
+var CURVES = [
+  ['catmull',    'flowing (Catmull-Rom)'],
+  ['centripetal','flowing, never loops'],
+  ['bezier',     'B\u00e9zier, points pull'],
+  ['quadratic',  'soft corners'],
+  ['linear',     'straight between points'],
+  ['step',       'right angles']
+];
+
+function tracePath(x, pts, s, kind){
+  var i, n=pts.length;
   x.beginPath();
+  if (n < 2) return;
+  var P = function(k){ return { x: pts[k].x*W, y: pts[k].y*H }; };
+
+  if (kind === 'linear'){
+    x.moveTo(P(0).x, P(0).y);
+    for (i=1;i<n;i++) x.lineTo(P(i).x, P(i).y);
+    return;
+  }
+  if (kind === 'step'){
+    /* alternate the turn so it reads as a staircase rather than a comb */
+    x.moveTo(P(0).x, P(0).y);
+    for (i=1;i<n;i++){
+      var a=P(i-1), b=P(i);
+      if (i % 2) { x.lineTo(b.x, a.y); } else { x.lineTo(a.x, b.y); }
+      x.lineTo(b.x, b.y);
+    }
+    return;
+  }
+  if (kind === 'quadratic'){
+    /* every anchor becomes a corner, rounded by meeting at the midpoints */
+    x.moveTo(P(0).x, P(0).y);
+    for (i=1;i<n-1;i++){
+      var c=P(i), nx=P(i+1);
+      x.quadraticCurveTo(c.x, c.y, (c.x+nx.x)/2, (c.y+nx.y)/2);
+    }
+    x.lineTo(P(n-1).x, P(n-1).y);
+    return;
+  }
+  if (kind === 'bezier'){
+    /* the odd-numbered points become handles: the line is pulled toward
+       them without passing through, the way a pen tool behaves */
+    x.moveTo(P(0).x, P(0).y);
+    for (i=1;i+1<n;i+=2){
+      var h=P(i), e=P(i+1);
+      x.quadraticCurveTo(h.x, h.y, e.x, e.y);
+    }
+    if (i < n) x.lineTo(P(n-1).x, P(n-1).y);
+    return;
+  }
+
+  /* the two splines. Centripetal scales each tangent by the square root
+     of the gap to its neighbour, which is what stops it looping back on
+     itself where anchors bunch together. */
+  var pad=[pts[0]].concat(pts,[pts[pts.length-1]]);
+  var f=(1-s)/2;
   x.moveTo(pad[1].x*W, pad[1].y*H);
-  for (var i=0;i<pad.length-3;i++){
+  for (i=0;i<pad.length-3;i++){
     var p0=pad[i],p1=pad[i+1],p2=pad[i+2],p3=pad[i+3];
+    var k1=f, k2=f;
+    if (kind === 'centripetal'){
+      var d01=Math.sqrt(Math.hypot((p1.x-p0.x)*W,(p1.y-p0.y)*H))||1;
+      var d12=Math.sqrt(Math.hypot((p2.x-p1.x)*W,(p2.y-p1.y)*H))||1;
+      var d23=Math.sqrt(Math.hypot((p3.x-p2.x)*W,(p3.y-p2.y)*H))||1;
+      k1 = f * d12/(d01+d12) * 2;
+      k2 = f * d12/(d12+d23) * 2;
+    }
     x.bezierCurveTo(
-      (p1.x+f*(p2.x-p0.x)/3)*W, (p1.y+f*(p2.y-p0.y)/3)*H,
-      (p2.x-f*(p3.x-p1.x)/3)*W, (p2.y-f*(p3.y-p1.y)/3)*H,
+      (p1.x+k1*(p2.x-p0.x)/3)*W, (p1.y+k1*(p2.y-p0.y)/3)*H,
+      (p2.x-k2*(p3.x-p1.x)/3)*W, (p2.y-k2*(p3.y-p1.y)/3)*H,
       p2.x*W, p2.y*H);
   }
 }
@@ -518,7 +615,7 @@ function fitInside(pts, w, squeeze){
   var i, S, x0, y0, x1, y1;
 
   function measure(P){
-    S = samplePath(P, w.tight, 14);   /* finer than the drawn curve, so the
+    S = samplePath(P, w.tight, 14, w.curve);   /* finer than the drawn curve, so the
                                          bulge between samples is covered */
     x0=1e9; y0=1e9; x1=-1e9; y1=-1e9;
     for (i=0;i<S.length;i++){
@@ -557,6 +654,46 @@ function fitInside(pts, w, squeeze){
   return moved;
 }
 
+/* Draw-on: the mark builds from its first anchor to its last, holds,
+   then starts over. Returns how much of the path should be visible,
+   0 to 1. Each wiggle keeps its own phase so they do not all march in
+   step. */
+function grownFraction(w){
+  if (w.anim !== 'draw' || driftOff) return 1;
+  var sp = w.growSpeed || 0.25;
+  var hold = w.growHold == null ? 0.2 : w.growHold;
+  var cycle = 1 + hold;
+  var phase = ((t * sp + (w.id % 17) / 17) % cycle + cycle) % cycle;
+  return phase >= 1 ? 1 : phase;
+}
+
+/* Cut a path short at a fraction of its length, keeping the shape of
+   what remains and ending part-way along a segment rather than only at
+   an anchor. */
+function partialPts(pts, frac){
+  if (frac >= 1) return pts;
+  var n = pts.length;
+  if (n < 2 || frac <= 0) return [pts[0], pts[0]];
+  var total = 0, i, segs = [];
+  for (i=1;i<n;i++){
+    var d = Math.hypot((pts[i].x-pts[i-1].x)*W, (pts[i].y-pts[i-1].y)*H);
+    segs.push(d); total += d;
+  }
+  if (!(total > 0)) return pts;
+  var want = total * frac, run = 0, out = [pts[0]];
+  for (i=1;i<n;i++){
+    if (run + segs[i-1] >= want){
+      var u = (want - run) / segs[i-1];
+      out.push({ x: lerp(pts[i-1].x, pts[i].x, u), y: lerp(pts[i-1].y, pts[i].y, u) });
+      break;
+    }
+    run += segs[i-1];
+    out.push(pts[i]);
+  }
+  if (out.length < 2) out.push(out[0]);
+  return out;
+}
+
 /* what the wiggle looks like on screen: drift, transform, then fitted */
 function viewPts(w){
   var c=centre(w);
@@ -578,6 +715,15 @@ function restPts(w){
    whenever the value sat off-centre, so the average crept away from
    where it was set. A range cannot bias: the value simply wanders
    between the two ends you chose. */
+/* On an hsb layer each mark carries its own colour; elsewhere the layer
+   hue rules and only saturation varies. */
+function wiggleHue(l, w){
+  return (l.kind === 'hsb' && w.hue != null) ? w.hue : l.hue;
+}
+function wiggleBri(l, w){
+  return (l.kind === 'hsb' && w.bri != null) ? w.bri : BRI;
+}
+
 function effSat(w){
   if (driftOff) return clamp(w.sat, 0, 100);
   var lo = dv(w,'satLo'), hi = dv(w,'satHi');
@@ -612,6 +758,7 @@ function effOp(g){
 }
 
 function shift(pt,i,w){
+  if (w.anim === 'draw') return pt;      /* the drawing-on is the movement */
   var d = dv(w,'drift');
   if (!d) return pt;
   var s=w.id*37, u=t*(dv(w,'speed')||1);
@@ -629,15 +776,21 @@ function shift(pt,i,w){
 function strokeRadius(w){
   return w.wBase * R * effW(w) * effScale(w) / 2;
 }
-function polyline(pts, tight){
-  return samplePath(pts, tight, 8).map(function(q){ return {x:q.x, y:q.y}; });
+function polyline(pts, tight, kind){
+  return samplePath(pts, tight, 8, kind).map(function(q){ return {x:q.x, y:q.y}; });
 }
 
 /* Sample the curve, remembering which pair of anchors each sample sits
    between. Testing anchors alone let the curve *between* them cross a
    neighbour untouched, which is where the overlaps were coming from. */
-function samplePath(pts, tight, per){
-  var pad=[pts[0]].concat(pts,[pts[pts.length-1]]), out=[], i, k;
+function samplePath(pts, tight, per, kind){
+  var out=[], i, k;
+  /* the straight kinds need no subdivision */
+  if (kind === 'linear' || kind === 'step'){
+    for (i=0;i<pts.length;i++) out.push({ x:pts[i].x*W, y:pts[i].y*H, a:Math.max(0,i-1), u:1 });
+    return out;
+  }
+  var pad=[pts[0]].concat(pts,[pts[pts.length-1]]);
   for (i=0;i<pad.length-3;i++){
     for (k=(i===0?0:1); k<=per; k++){
       var u=k/per;
@@ -746,7 +899,7 @@ function keepApart(items, gap){
      the drawn arrangement is known to be clear, so this always resolves
      unless the marks were drawn crossing in the first place. */
   var S2=[], i2, j2, k2, m2;
-  for (i2=0;i2<items.length;i2++) S2.push(samplePath(items[i2].pts, items[i2].w.tight, 6));
+  for (i2=0;i2<items.length;i2++) S2.push(samplePath(items[i2].pts, items[i2].w.tight, 6, items[i2].w.curve));
   for (i2=0;i2<items.length;i2++){
     for (j2=0;j2<items.length;j2++){
       if (j2===i2 || items[i2].settle >= 1) continue;
@@ -776,7 +929,7 @@ function keepApart(items, gap){
     for (tries=0; tries<10; tries++){
       var Sx=[], eased=false;
       for (ii=0;ii<items.length;ii++)
-        Sx.push(samplePath(items[ii].pts, items[ii].w.tight, 6));
+        Sx.push(samplePath(items[ii].pts, items[ii].w.tight, 6, items[ii].w.curve));
       for (ii=0;ii<items.length;ii++){
         for (jj=ii+1;jj<items.length;jj++){
           var needX = widthOf(items[ii])*items[ii].shrink
@@ -806,7 +959,7 @@ function keepApart(items, gap){
     /* fold the shrink into the drawn shape, about each mark's own centre */
     for (i=0;i<items.length;i++){
       if (items[i].shrink >= 0.999) continue;
-      var c2 = centreOf(samplePath(items[i].pts, items[i].w.tight, 4));
+      var c2 = centreOf(samplePath(items[i].pts, items[i].w.tight, 4, items[i].w.curve));
       var k2 = items[i].shrink, out2=[];
       for (var q2=0;q2<items[i].pts.length;q2++)
         out2.push({ x: (c2.x + (items[i].pts[q2].x*W - c2.x)*k2)/W,
@@ -841,12 +994,29 @@ function render(){
   for (var i=0;i<layers.length;i++){
     var l=layers[i];
     if (!vis(l)) continue;
+    if (l.kind === 'gradient'){
+      var gitems=[];
+      for (var gj=0;gj<l.wiggles.length;gj++){
+        if (!l.wiggles[gj].show) continue;
+        gitems.push({ w:l.wiggles[gj], pts:viewPts(l.wiggles[gj]) });
+      }
+      if (gitems.length > 1) keepApart(gitems, sepGap);
+      renderGradientLayer(l, gitems);
+      ctx.globalCompositeOperation=l.blend;
+      ctx.globalAlpha = l.alpha == null ? 1 : l.alpha;
+      ctx.drawImage(sheetC,0,0,W,H);
+      ctx.globalAlpha = 1;
+      continue;
+    }
     sheet.globalCompositeOperation='source-over';
     sheet.globalAlpha=1;
     sheet.clearRect(0,0,W,H);
     if (l.ground.show){
-      sheet.globalAlpha=effOp(l.ground);
-      sheet.fillStyle=hsv(l.hue,100,BRI);
+      var gg = l.ground;
+      sheet.globalAlpha=effOp(gg);
+      sheet.fillStyle = (l.kind === 'hsb')
+        ? hsv(gg.hue==null?l.hue:gg.hue, gg.sat==null?100:gg.sat, gg.bri==null?100:gg.bri)
+        : hsv(l.hue,100,BRI);
       sheet.fillRect(0,0,W,H);
       sheet.globalAlpha=1;
     }
@@ -857,17 +1027,33 @@ function render(){
     }
     if (items.length > 1) keepApart(items, sepGap);
     for (j=0;j<items.length;j++){
-      if (items[j].w.brush) brushStroke(items[j].pts, items[j].w, l.hue, items[j].squeeze);
-      else lineStroke(items[j].pts, items[j].w, l.hue, items[j].squeeze);
+      var fr = grownFraction(items[j].w);
+      if (fr <= 0.002) continue;
+      var shown = fr >= 1 ? items[j].pts : partialPts(items[j].pts, fr);
+      sheet.globalAlpha = items[j].w.alpha == null ? 1 : items[j].w.alpha;
+      var wh = wiggleHue(l, items[j].w), wb = wiggleBri(l, items[j].w);
+      if (items[j].w.brush) brushStroke(shown, items[j].w, wh, items[j].squeeze, wb);
+      else lineStroke(shown, items[j].w, wh, items[j].squeeze, wb);
+      sheet.globalAlpha = 1;
     }
     ctx.globalCompositeOperation=l.blend;
+    ctx.globalAlpha = l.alpha == null ? 1 : l.alpha;
     ctx.drawImage(sheetC,0,0,W,H);
+    ctx.globalAlpha = 1;
   }
   ctx.globalCompositeOperation='source-over';
   ctx.globalAlpha=1;
   if (refImg && refShow && refOnTop) drawRef();
   measureLight();
   if (el.pts.checked) drawAnchors();
+  if (drawing && drawing.length > 1){
+    ctx.strokeStyle='rgba(30,28,20,.75)'; ctx.lineWidth=2;
+    ctx.lineCap='round'; ctx.lineJoin='round';
+    ctx.beginPath();
+    ctx.moveTo(drawing[0].x, drawing[0].y);
+    for (var dq=1; dq<drawing.length; dq++) ctx.lineTo(drawing[dq].x, drawing[dq].y);
+    ctx.stroke();
+  }
 }
 
 /* Composite the grounds by arithmetic — they are flat fills, so the
@@ -947,17 +1133,133 @@ function drawRef(){
   ctx.globalCompositeOperation='source-over';
   ctx.globalAlpha=1;
 }
-function lineStroke(pts,w,hue,squeeze){
-  sheet.strokeStyle=hsv(hue,effSat(w),BRI);
+/* Where along a repeating run a point falls. The plain remainder sends
+   the very end back to the start, so a narrow spread looked as though it
+   went nowhere; an exact whole number means the end of a run, not the
+   beginning of the next. */
+function runAt(u, cycles){
+  var v = u * (cycles || 1);
+  var f = v - Math.floor(v);
+  return (f === 0 && v > 0) ? 1 : f;
+}
+
+/* A field of colour laid across the whole canvas, which the layer's
+   wiggles then cut into. The gradient runs at whatever angle you choose
+   regardless of where the marks wander, so a stroke crossing the canvas
+   picks up whatever the field holds beneath it. */
+function paintField(x, l){
+  var a = (l.gAngle||0) * Math.PI/180;
+  var cx = W/2, cy = H/2;
+  var half = (Math.abs(Math.cos(a))*W + Math.abs(Math.sin(a))*H) / 2;
+  var g = x.createLinearGradient(cx - Math.cos(a)*half, cy - Math.sin(a)*half,
+                                 cx + Math.cos(a)*half, cy + Math.sin(a)*half);
+  var span = 360 * (l.gSpread == null ? 1 : l.gSpread);
+  var cyc = l.gCycles || 1;
+  var steps = Math.max(2, Math.min(64, Math.round(12 * cyc + span/12)));
+  for (var i=0;i<=steps;i++){
+    var u = i/steps;
+    g.addColorStop(u, hsv(l.hue + (l.gShift||0) + span*runAt(u, cyc), 100, BRI));
+  }
+  x.fillStyle = g;
+  x.fillRect(0,0,W,H);
+}
+
+/* A second field, of opacity rather than colour, on its own angle. Laid
+   over the result with destination-in it multiplies what is already
+   there, so the marks fade across the canvas independently of the way
+   the colour runs. */
+function paintAlphaField(x, l){
+  var a = (l.aAngle||0) * Math.PI/180;
+  var cx = W/2, cy = H/2;
+  var half = (Math.abs(Math.cos(a))*W + Math.abs(Math.sin(a))*H) / 2;
+  var g = x.createLinearGradient(cx - Math.cos(a)*half, cy - Math.sin(a)*half,
+                                 cx + Math.cos(a)*half, cy + Math.sin(a)*half);
+  var from = l.aFrom == null ? 1 : l.aFrom;
+  var to   = l.aTo   == null ? 0 : l.aTo;
+  var cyc  = l.aCycles || 1;
+  var steps = Math.max(2, Math.min(48, Math.round(10*cyc + 8)));
+  for (var i=0;i<=steps;i++){
+    var u = i/steps;
+    g.addColorStop(u, 'rgba(0,0,0,' + (from + (to-from)*runAt(u, cyc)).toFixed(3) + ')');
+  }
+  x.globalCompositeOperation = 'destination-in';
+  x.fillStyle = g;
+  x.fillRect(0,0,W,H);
+  x.globalCompositeOperation = 'source-over';
+}
+
+/* Draw the layer's marks as a solid mask, then keep only the part of the
+   field they cover. Because every mark reveals the same field, two that
+   cross simply merge — no build-up where they overlap. */
+function renderGradientLayer(l, items){
+  buf.globalCompositeOperation='source-over';
+  buf.globalAlpha=1;
+  buf.clearRect(0,0,W,H);
+  var save = sheet;
+  sheet = buf;                       /* the stroke painters write to the mask */
+  for (var j=0;j<items.length;j++){
+    var fr = grownFraction(items[j].w);
+    if (fr <= 0.002) continue;
+    var shown = fr >= 1 ? items[j].pts : partialPts(items[j].pts, fr);
+    buf.globalAlpha = items[j].w.alpha == null ? 1 : items[j].w.alpha;
+    var keep = items[j].w.grad; items[j].w.grad = false;   /* mask is flat */
+    if (items[j].w.brush) brushStroke(shown, items[j].w, l.hue, items[j].squeeze);
+    else lineStroke(shown, items[j].w, l.hue, items[j].squeeze);
+    items[j].w.grad = keep;
+    buf.globalAlpha = 1;
+  }
+  sheet = save;
+
+  sheet.globalCompositeOperation='source-over';
+  sheet.globalAlpha=1;
+  sheet.clearRect(0,0,W,H);
+  paintField(sheet, l);
+  sheet.globalCompositeOperation='destination-in';
+  sheet.drawImage(bufC,0,0,W,H);
+  sheet.globalCompositeOperation='source-over';
+  if (l.aOn) paintAlphaField(sheet, l);
+}
+
+/* A stroke that changes colour along its length. Canvas gradients run
+   along a straight axis, which is no use to a meandering line, so the
+   path is walked in short segments, each given its own colour. Round
+   caps make the joins invisible.
+
+   spread is how much of the hue circle the run covers — 1 is the whole
+   spectrum — shift moves where it starts, cycles repeats it along the
+   mark. */
+function gradStroke(pts, w, hue, squeeze){
+  var S = samplePath(pts, w.tight, 6, w.curve);
+  var n = S.length;
+  if (n < 2) return;
+  var sat = effSat(w);
+  var span = 360 * (w.gradSpread == null ? 1 : w.gradSpread);
+  var shift = w.gradShift || 0;
+  var cyc = w.gradCycles || 1;
+  sheet.lineWidth = w.wBase*R*effW(w)*effScale(w)*(squeeze==null?1:squeeze);
+  sheet.lineCap='round'; sheet.lineJoin='round';
+  for (var i=1;i<n;i++){
+    var u = (i-0.5)/(n-1);
+    sheet.strokeStyle = hsv(hue + shift + span*runAt(u, cyc), sat, BRI);
+    sheet.beginPath();
+    sheet.moveTo(S[i-1].x, S[i-1].y);
+    sheet.lineTo(S[i].x, S[i].y);
+    sheet.stroke();
+  }
+}
+
+function lineStroke(pts,w,hue,squeeze,bri){
+  if (w.grad) return gradStroke(pts, w, hue, squeeze);
+  sheet.strokeStyle=hsv(hue,effSat(w),bri==null?BRI:bri);
   sheet.lineWidth=w.wBase*R*effW(w)*effScale(w)*(squeeze==null?1:squeeze);
   sheet.lineCap='round'; sheet.lineJoin='round';
-  tracePath(sheet,pts,w.tight);
+  tracePath(sheet,pts,w.tight,w.curve);
   sheet.stroke();
 }
 /* Stamped at varying width: load runs the brush dry along its length,
    swell thickens and thins it irregularly, bite narrows the mark where
    the curve turns hardest — the way a brush does through a corner. */
-function brushStroke(pts,w,hue,squeeze){
+function brushStroke(pts,w,hue,squeeze,bri){
   var pad=[pts[0]].concat(pts,[pts[pts.length-1]]);
   var base=w.wBase*R*effW(w)*effScale(w)*(squeeze==null?1:squeeze);
   var segs=pad.length-3, steps=40, i, k;
@@ -978,7 +1280,7 @@ function brushStroke(pts,w,hue,squeeze){
   buf.globalCompositeOperation='source-over';
   buf.globalAlpha=1;
   buf.clearRect(0,0,W,H);
-  buf.fillStyle=hsv(hue,effSat(w),BRI);
+  buf.fillStyle=hsv(hue,effSat(w),bri==null?BRI:bri);
   for (i=0;i<n;i++){
     var g=i/(n-1);
     var load=1+w.load*(0.5-g)*1.6;
@@ -1018,6 +1320,7 @@ function moving(){
     if (!vis(l)) return false;
     if (l.ground.show && dv(l.ground,'opHi') > dv(l.ground,'opLo')) return true;
     return l.wiggles.some(function(w){
+      if (w.anim === 'draw') return true;
       return w.show && (dv(w,'drift')>0 || dv(w,'wDrift')>0 ||
         dv(w,'satHi') > dv(w,'satLo') ||
         dv(w,'tDrift')>0 || dv(w,'rDrift')>0 || dv(w,'sDrift')>0);
@@ -1107,6 +1410,30 @@ function addAnchorAt(w, p){
   return true;
 }
 
+/* Ramer-Douglas-Peucker: keep the points that carry the shape and drop
+   the rest. A drawn stroke arrives as hundreds of samples; this reduces
+   it to the handful of anchors you would have placed by hand. */
+function simplify(pts, tol){
+  if (pts.length < 3) return pts.slice();
+  var first=0, last=pts.length-1, keep=[first,last], stack=[[first,last]];
+  function dist(p,a,b){
+    var vx=b.x-a.x, vy=b.y-a.y, L=vx*vx+vy*vy;
+    var t = L>0 ? ((p.x-a.x)*vx+(p.y-a.y)*vy)/L : 0;
+    t = t<0?0:(t>1?1:t);
+    return Math.hypot(p.x-(a.x+vx*t), p.y-(a.y+vy*t));
+  }
+  while (stack.length){
+    var seg=stack.pop(), i0=seg[0], i1=seg[1], best=-1, bd=tol;
+    for (var i=i0+1;i<i1;i++){
+      var d=dist(pts[i], pts[i0], pts[i1]);
+      if (d>bd){ bd=d; best=i; }
+    }
+    if (best>0){ keep.push(best); stack.push([i0,best],[best,i1]); }
+  }
+  keep.sort(function(a,b){ return a-b; });
+  return keep.map(function(k){ return pts[k]; });
+}
+
 /* which anchor is under the pointer, if any */
 function anchorAt(w, p){
   var v=viewPts(w), best=-1, bd=HIT*HIT;
@@ -1117,13 +1444,64 @@ function anchorAt(w, p){
   return best;
 }
 
+/* A finished stroke becomes a new wiggle if a layer is waiting for one,
+   otherwise it extends the active wiggle from whichever end it began
+   nearest. Either way it is reduced to a few draggable anchors. */
+function finishStroke(stroke){
+  if (stroke.length < 2){
+    var a3 = activeW();
+    if (a3 && addAnchorAt(a3.w, stroke[0])){ build(); refresh(); }
+    return;
+  }
+  var simple = simplify(stroke, Math.max(4, R * 0.012));
+  if (simple.length < 2) return;
+
+  if (armLayer){
+    var l = armLayer; armLayer = null;
+    var w = newWiggle(uid * 7 + l.wiggles.length * 53);
+    w.base = simple.map(function(q){ return { x:q.x/W, y:q.y/H }; });
+    w.pts  = w.base.map(function(q){ return { x:q.x, y:q.y }; });
+    w.n = w.base.length; w.seedLen = w.n; w.maxN = Math.max(60, w.n);
+    l.wiggles.push(w);
+    activeId = w.id;
+    build(); refresh();
+    return;
+  }
+
+  var a4 = activeW();
+  if (!a4) return;
+  var w2 = a4.w, c = centre(w2), v = viewPts(w2);
+  var head = Math.hypot(v[0].x*W - stroke[0].x, v[0].y*H - stroke[0].y);
+  var tail = Math.hypot(v[v.length-1].x*W - stroke[0].x, v[v.length-1].y*H - stroke[0].y);
+  var atEnd = tail <= head;
+  /* the drawn points are in view space; put them back through the transform */
+  var add = simple.map(function(q){
+    var b2 = unplace({ x:q.x/W, y:q.y/H }, w2, c);
+    return { x: clamp(b2.x,-0.5,1.5), y: clamp(b2.y,-0.5,1.5) };
+  });
+  if (!atEnd) add.reverse();
+  var at = span(w2);
+  if (atEnd) Array.prototype.splice.apply(w2.base, [at + w2.n, 0].concat(add));
+  else       Array.prototype.splice.apply(w2.base, [at, 0].concat(add));
+  w2.n += add.length;
+  if (w2.maxN < w2.n) w2.maxN = w2.n;
+  setAnchors(w2, w2.n);
+  build(); refresh();
+}
+
 function onDown(e){
   downAt = { x:e.clientX, y:e.clientY };
   moved = false;
   if (!el.pts.checked) return;
-  var a=activeW(); if(!a) return;
-  var p=pos(e), i=anchorAt(a.w, p);
-  if (i < 0) return;
+  if (el.fs && el.fs.checked) return;          /* fullscreen owns the tap */
+  var p=pos(e);
+  var a=activeW();
+  var i = a ? anchorAt(a.w, p) : -1;
+  if (i < 0){
+    /* nothing under the pointer: start drawing */
+    if (armLayer || a){ drawing = [p]; e.preventDefault(); }
+    return;
+  }
   drag={w:a.w, i:i};
   if (cv.setPointerCapture) try{ cv.setPointerCapture(e.pointerId); }catch(err){}
   e.preventDefault();
@@ -1132,6 +1510,14 @@ function onDown(e){
 function onMove(e){
   if (downAt && !moved) {
     if (Math.abs(e.clientX-downAt.x) > 6 || Math.abs(e.clientY-downAt.y) > 6) moved = true;
+  }
+  if (drawing){
+    var q=pos(e);
+    var last=drawing[drawing.length-1];
+    if (Math.hypot(q.x-last.x, q.y-last.y) > 2) drawing.push(q);
+    e.preventDefault();
+    render();
+    return;
   }
   if (!drag) return;
   var p=pos(e), w=drag.w;
@@ -1160,9 +1546,15 @@ function onUp(){
     render();
     queueSave();
   }
-  /* A clean tap — nothing grabbed, no movement. With fullscreen armed
-     that toggles the preview; otherwise, while anchors are showing, it
-     extends the active wiggle from its nearer end. */
+  if (drawing){
+    var stroke = drawing; drawing = null;
+    finishStroke(stroke);
+    downAt = null; moved = false;
+    return;
+  }
+
+  /* A clean tap. With fullscreen armed that toggles the preview;
+     otherwise it adds one anchor at the nearer end. */
   if (!wasDrag && !moved){
     if (el.fs && el.fs.checked) setFull(!isFull);
     else if (el.pts.checked && downAt){
@@ -1198,6 +1590,88 @@ function check(host,label,val,fn){
   host.appendChild(lab);
   return box;
 }
+/* A colour wheel: hue around, saturation from the middle out, with
+   brightness on a slider beside it. Drawn once into its own canvas and
+   redrawn when brightness changes, so it always shows the colours
+   actually available at that level. */
+function hsbPicker(host, label, o, keys, hueFallback){
+  var head=document.createElement('label');
+  head.appendChild(document.createTextNode(label));
+  var read=document.createElement('span'); read.className='v';
+  head.appendChild(read);
+  host.appendChild(head);
+
+  var wrap=document.createElement('div'); wrap.className='wheelWrap';
+  var wheel=document.createElement('canvas');
+  wheel.className='wheel'; wheel.width=104; heightSet(wheel);
+  var side=document.createElement('div'); side.className='wheelSide';
+  var swatch=document.createElement('div'); swatch.className='wheelSwatch';
+  side.appendChild(swatch);
+  wrap.appendChild(wheel); wrap.appendChild(side);
+  host.appendChild(wrap);
+
+  function heightSet(c){ c.height=104; }
+  var wx=wheel.getContext('2d');
+  var Rw=52;
+
+  function val(k, d){ return o[keys[k]]==null ? d : o[keys[k]]; }
+
+  function drawWheel(){
+    var bri=val('b',100);
+    wx.clearRect(0,0,104,104);
+    /* a ring of hue wedges, each shaded from white at the centre */
+    for (var a=0;a<360;a+=2){
+      var g=wx.createLinearGradient(Rw,Rw,
+        Rw+Math.cos((a+1)*Math.PI/180)*Rw, Rw+Math.sin((a+1)*Math.PI/180)*Rw);
+      g.addColorStop(0, hsv(a, 0, bri));
+      g.addColorStop(1, hsv(a, 100, bri));
+      wx.fillStyle=g;
+      wx.beginPath();
+      wx.moveTo(Rw,Rw);
+      wx.arc(Rw,Rw,Rw, a*Math.PI/180, (a+2.2)*Math.PI/180);
+      wx.closePath();
+      wx.fill();
+    }
+    /* where the current colour sits */
+    var h=val('h',hueFallback), sN=val('s',100)/100;
+    var px=Rw+Math.cos(h*Math.PI/180)*Rw*sN;
+    var py=Rw+Math.sin(h*Math.PI/180)*Rw*sN;
+    wx.strokeStyle='rgba(255,255,255,.9)'; wx.lineWidth=2;
+    wx.beginPath(); wx.arc(px,py,6,0,Math.PI*2); wx.stroke();
+    wx.strokeStyle='rgba(30,28,20,.9)'; wx.lineWidth=1;
+    wx.beginPath(); wx.arc(px,py,6,0,Math.PI*2); wx.stroke();
+  }
+  function show(){
+    swatch.style.background=hex(val('h',hueFallback), val('s',100), val('b',100));
+    read.textContent = Math.round(val('h',hueFallback))+'\u00b0 '+
+      Math.round(val('s',100))+' '+Math.round(val('b',100));
+    drawWheel();
+  }
+  function pick(e){
+    var r=wheel.getBoundingClientRect();
+    var x=(e.clientX-r.left)*(104/r.width)-Rw;
+    var y=(e.clientY-r.top)*(104/r.height)-Rw;
+    var d=Math.sqrt(x*x+y*y);
+    var a=Math.atan2(y,x)*180/Math.PI;
+    o[keys.h]=(a+360)%360;
+    o[keys.s]=clamp(d/Rw*100, 0, 100);
+    show(); refresh();
+  }
+  var picking=false;
+  wheel.addEventListener('pointerdown', function(e){
+    picking=true;
+    if (wheel.setPointerCapture) try{ wheel.setPointerCapture(e.pointerId); }catch(err){}
+    e.preventDefault(); pick(e);
+  });
+  wheel.addEventListener('pointermove', function(e){ if(picking){ e.preventDefault(); pick(e); } });
+  wheel.addEventListener('pointerup', function(){ picking=false; });
+  wheel.addEventListener('pointercancel', function(){ picking=false; });
+
+  slider(side,'brightness',0,100,1,val('b',100),function(v){return v.toFixed(0);},
+    function(v){ o[keys.b]=v; show(); refresh(); });
+  show();
+}
+
 function picker(host,label,opts,val,fn){
   var row=document.createElement('div'); row.className='row';
   var lab=document.createElement('label');
@@ -1256,7 +1730,7 @@ function section(host,title,colFn,open,o){
   var d=document.createElement('details'); d.open=!!open;
   var s=document.createElement('summary');
   var sw=document.createElement('span');
-  sw.className='sw'+(o.round?' line':'');
+  sw.className=('sw'+(o.round?' line':'')+(o.mark?' '+o.mark():'')).replace(/\s+$/,'');
   s.appendChild(sw);
   s.appendChild(document.createTextNode(title));
   if (o.tag){
@@ -1285,6 +1759,7 @@ function section(host,title,colFn,open,o){
   var body=document.createElement('div'); body.className='bd';
   d.appendChild(s); d.appendChild(body); host.appendChild(d);
   d._paint=function(){
+    sw.className=('sw'+(o.round?' line':'')+(o.mark?' '+o.mark():'')).replace(/\s+$/,'');
     sw.style.background=colFn();
     /* rebuild the class list every time — appending to it meant a panel
        once dimmed stayed dimmed, and the string grew without bound */
@@ -1456,9 +1931,17 @@ function build(){
 
   /* the layers */
   layers.forEach(function(l,li){
-    var lb=section(host,'Layer '+(li+2),function(){return hex(l.hue,100,BRI);},l.open,{
+    var lb=section(host,'Layer '+(li+2),function(){
+        return (l.kind==='hsb' && l.ground.hue!=null)
+          ? hex(l.ground.hue, l.ground.sat==null?100:l.ground.sat,
+                l.ground.bri==null?100:l.ground.bri)
+          : hex(l.hue,100,BRI);
+      }, l.open,{
       onToggle:function(o){ l.open=o; },
       isOff:function(){ return !vis(l); },
+      mark:function(){
+        return l.kind==='hsb' ? 'hsb' : (l.kind==='gradient' ? 'grad' : '');
+      },
       toggles:[
         { label:'M', title:'mute this layer',
           active:function(){ return l.mute; },
@@ -1468,6 +1951,7 @@ function build(){
           onClick:function(){ l.solo=!l.solo; refresh(); } }
       ]
     });
+    if ((l.kind||'paint') !== 'hsb'){
     var hueSlider;
     var markPal = palette(lb, function(){ return l.hue; }, function(v){
       l.hue=v;
@@ -1476,17 +1960,65 @@ function build(){
     });
     hueSlider = slider(lb,'hue (whole layer)',0,360,1,l.hue,function(v){return v.toFixed(0);},
       function(v){ l.hue=v; markPal(); refresh(); });
+    }
+    picker(lb,'layer is',
+      [['paint','a colour separation \u2014 one hue'],
+       ['hsb','free colour \u2014 pick each one'],
+       ['gradient','a gradient, revealed by the marks']],
+      l.kind||'paint', function(v){
+        l.kind=v;
+        if (v==='hsb'){
+          if (l.ground.hue==null) l.ground.hue=l.hue;
+          l.wiggles.forEach(function(w){ if (w.hue==null) w.hue=l.hue; });
+        }
+        build(); refresh();
+      });
+    slider(lb,'layer opacity',0,1,0.01,l.alpha==null?1:l.alpha,
+      function(v){return v.toFixed(2);}, function(v){ l.alpha=v; refresh(); });
     picker(lb,'blend onto layers below',MODES,l.blend,function(v){ l.blend=v; refresh(); });
     var ah=document.createElement('p'); ah.className='hint';
     ah.textContent='Holds the strokes on this layer clear of one another as they '+
       'drift. Anchors still show where you actually drew.';
     lb.appendChild(ah);
 
+    if ((l.kind||'paint') === 'gradient'){
+      var fb=section(lb,'Gradient',function(){return hex(l.hue,100,BRI);},true);
+      slider(fb,'angle',0,360,1,l.gAngle||0,function(v){return v.toFixed(0)+'\u00b0';},
+        function(v){ l.gAngle=v; refresh(); });
+      slider(fb,'spread',0,1,0.01,l.gSpread==null?1:l.gSpread,
+        function(v){return Math.round(v*360)+'\u00b0 of the circle';},
+        function(v){ l.gSpread=v; refresh(); });
+      slider(fb,'start',0,360,1,l.gShift||0,
+        function(v){return v.toFixed(0)+'\u00b0 from the layer hue';},
+        function(v){ l.gShift=v; refresh(); });
+      slider(fb,'runs across',0.25,4,0.25,l.gCycles||1,
+        function(v){return v.toFixed(2)+' times';},
+        function(v){ l.gCycles=v; refresh(); });
+      check(fb,'fade across as well',!!l.aOn,function(v){ l.aOn=v; build(); refresh(); });
+      if (l.aOn){
+        slider(fb,'fade angle',0,360,1,l.aAngle==null?90:l.aAngle,
+          function(v){return v.toFixed(0)+'\u00b0';}, function(v){ l.aAngle=v; refresh(); });
+        slider(fb,'fade from',0,1,0.01,l.aFrom==null?1:l.aFrom,
+          function(v){return v.toFixed(2);}, function(v){ l.aFrom=v; refresh(); });
+        slider(fb,'fade to',0,1,0.01,l.aTo==null?0:l.aTo,
+          function(v){return v.toFixed(2);}, function(v){ l.aTo=v; refresh(); });
+        slider(fb,'fade runs across',0.25,4,0.25,l.aCycles||1,
+          function(v){return v.toFixed(2)+' times';}, function(v){ l.aCycles=v; refresh(); });
+      }
+      var fh=document.createElement('p'); fh.className='hint';
+      fh.textContent='The gradient lies across the whole canvas at this angle. The '+
+        'marks on this layer cut into it, so each one shows whatever the field holds '+
+        'beneath it \u2014 and two that cross merge rather than building up.';
+      fb.appendChild(fh);
+    }
+
     var g=l.ground;
     var gb=section(lb,'Ground',function(){return hex(l.hue,100,BRI);},g.open,{
       onToggle:function(o){ g.open=o; },
       isOff:function(){ return !g.show; }
     });
+    if ((l.kind||'paint') === 'hsb')
+      hsbPicker(gb, 'colour', g, {h:'hue',s:'sat',b:'bri'}, l.hue);
     slider(gb,'opacity',0,1,0.01,g.opacity,function(v){return v.toFixed(2);},
       function(v){ g.opacity=v; groundTrim=1; lumaAvg=null; refresh(); });
     ownDrift(gb, g, true);
@@ -1503,8 +2035,43 @@ function build(){
         isOn:function(){ return w.id===activeId; },
         isOff:function(){ return !w.show; }
       });
-      slider(wb,'saturation',0,100,1,w.sat,function(v){return v.toFixed(0);},
-        function(v){ w.sat=v; refresh(); });
+      picker(wb,'curve',CURVES,w.curve||'catmull',
+        function(v){ w.curve=v; refresh(); });
+      picker(wb,'movement',
+        [['drift','anchors drift'],['draw','draws itself, start to end']],
+        w.anim||'drift', function(v){ w.anim=v; build(); refresh(); });
+      if ((w.anim||'drift') === 'draw'){
+        slider(wb,'drawing speed',0.02,5,0.01,w.growSpeed||0.25,
+          function(v){return v.toFixed(2)+'x';},
+          function(v){ w.growSpeed=v; refresh(); });
+        slider(wb,'pause when complete',0,3,0.05,w.growHold==null?0.2:w.growHold,
+          function(v){return v.toFixed(2);},
+          function(v){ w.growHold=v; refresh(); });
+      }
+      if ((l.kind||'paint') === 'hsb')
+        hsbPicker(wb, 'colour', w, {h:'hue',s:'sat',b:'bri'}, l.hue);
+      else
+        slider(wb,'saturation',0,100,1,w.sat,function(v){return v.toFixed(0);},
+          function(v){ w.sat=v; refresh(); });
+      slider(wb,'opacity',0,1,0.01,w.alpha==null?1:w.alpha,
+        function(v){return v.toFixed(2);}, function(v){ w.alpha=v; refresh(); });
+      check(wb,'gradient along the mark',!!w.grad,function(v){ w.grad=v; build(); refresh(); });
+      if (w.grad){
+        slider(wb,'gradient spread',0,1,0.01,w.gradSpread==null?1:w.gradSpread,
+          function(v){return Math.round(v*360)+'\u00b0 of the circle';},
+          function(v){ w.gradSpread=v; refresh(); });
+        slider(wb,'gradient start',0,360,1,w.gradShift||0,
+          function(v){return v.toFixed(0)+'\u00b0 from the layer hue';},
+          function(v){ w.gradShift=v; refresh(); });
+        slider(wb,'runs along the mark',0.25,4,0.25,w.gradCycles||1,
+          function(v){return v.toFixed(2)+' times';},
+          function(v){ w.gradCycles=v; refresh(); });
+        var gh3=document.createElement('p'); gh3.className='hint';
+        gh3.textContent='Spread 360\u00b0 is the whole spectrum; narrow it for a shift '+
+          'within one family. The layer hue sets where it begins, and saturation '+
+          'still applies.';
+        wb.appendChild(gh3);
+      }
       slider(wb,'stroke weight',0.02,5,0.01,w.w,function(v){return v.toFixed(2)+'x';},
         function(v){ w.w=v; refresh(); });
       slider(wb,'curve tightness',-2,1,0.01,w.tight,function(v){return v.toFixed(2);},
@@ -1518,16 +2085,6 @@ function build(){
       slider(wb,'scale',0.05,3,0.01,w.scale,function(v){return v.toFixed(2)+'x';},
         function(v){ w.scale=v; refresh(); });
 
-      picker(wb,'anchors grow from',
-        [['both','both ends, alternating'],['end','the end'],['start','the start'],
-         ['resample','nowhere (redistribute)']],
-        w.grow||'both', function(v){ w.grow=v; setAnchors(w, w.n); refresh(); });
-      slider(wb,'growth reach',0.01,0.40,0.005,w.reach||0.08,
-        function(v){return v.toFixed(3);},
-        function(v){ w.reach=v; refresh(); });
-      slider(wb,'anchors',3,Math.max(24, w.base.length + 8),1,w.n,
-        function(v){return v.toFixed(0);},
-        function(v){ setAnchors(w, v); refresh(); });
       ownDrift(wb, w, false);
       check(wb,'visible',w.show,function(v){ w.show=v; refresh(); });
 
@@ -1563,9 +2120,11 @@ function build(){
       e.textContent='No wiggles on this layer yet.';
       lb.appendChild(e);
     }
-    btn(lb,'+ Add wiggle',function(){
-      var w=newWiggle(uid*7+l.wiggles.length*53);
-      l.wiggles.push(w); activeId=w.id; build(); refresh();
+    btn(lb, armLayer===l ? 'Now draw it on the canvas' : '+ Draw a wiggle', function(){
+      armLayer = (armLayer===l) ? null : l;
+      el.pts.checked = true;
+      cv.className = 'editing';
+      build(); refresh();
     });
     var lm=document.createElement('div'); lm.className='mini'; lb.appendChild(lm);
     btn(lm,'\u2193',function(){ moveL(l,-1); }, li===0);
@@ -1839,14 +2398,26 @@ function buildViewer(){
   var title=(el.titleValue||'Wiggle').trim() || 'Wiggle';
   var state={ title:title, cmW:cmW, cmH:cmH,
     layers:layers.map(function(l){
-      return { hue:l.hue, blend:l.blend, show:vis(l),
+      return { hue:l.hue, blend:l.blend, alpha:(l.alpha==null?1:l.alpha), show:vis(l),
+        kind:l.kind||'paint', gAngle:l.gAngle||0,
+        gSpread:(l.gSpread==null?1:l.gSpread), gShift:l.gShift||0, gCycles:l.gCycles||1,
+        aOn:!!l.aOn, aAngle:l.aAngle||0, aFrom:(l.aFrom==null?1:l.aFrom),
+        aTo:(l.aTo==null?0:l.aTo), aCycles:l.aCycles||1,
         ground:{opacity:l.ground.opacity,
+                hue:l.ground.hue, sat:l.ground.sat, bri:l.ground.bri,
                 opLo:(l.ground.opLo==null?l.ground.opacity:l.ground.opLo),
                 opHi:(l.ground.opHi==null?l.ground.opacity:l.ground.opHi),
-                opSpeed:l.ground.opSpeed||1, seed:l.ground.seed||13, show:l.ground.show},
+                opSpeed:l.ground.opSpeed||1, seed:l.ground.seed||13,
+                hue:l.ground.hue, sat:l.ground.sat, bri:l.ground.bri,
+                show:l.ground.show},
         wiggles:l.wiggles.map(function(w){
           return { id:w.id, sat:w.sat, w:w.w, wBase:w.wBase, tight:w.tight,
-            tx:w.tx, ty:w.ty, rot:w.rot, scale:w.scale,
+            tx:w.tx, ty:w.ty, rot:w.rot, scale:w.scale, curve:w.curve||'catmull',
+            alpha:(w.alpha==null?1:w.alpha), hue:w.hue, bri:w.bri, grad:!!w.grad,
+            gradSpread:(w.gradSpread==null?1:w.gradSpread),
+            gradShift:w.gradShift||0, gradCycles:w.gradCycles||1,
+            anim:w.anim||'drift', growSpeed:w.growSpeed||0.25,
+            growHold:(w.growHold==null?0.2:w.growHold),
             satLo:(w.satLo==null?w.sat:w.satLo), satHi:(w.satHi==null?w.sat:w.satHi),
             satSpeed:w.satSpeed||1,
             wDrift:w.wDrift||0, wSpeed:w.wSpeed||1,
@@ -1859,8 +2430,9 @@ function buildViewer(){
 
   var fns=[clamp,lerp,hash2,noise2,hsv,catmull,tracePath,shift,
     centre,effTx,effTy,effRot,effScale,place,strokeRadius,reinIn,samplePath,
-    fitInside,viewPts,restPts,
-    effSat,effW,rawOp,effOp,blendPair,groundLuma,measureLight,boundsOf,boxesMiss,pushOff,centreOf,slideBy,keepApart,
+    fitInside,grownFraction,partialPts,runAt,viewPts,restPts,
+    wiggleHue,wiggleBri,effSat,effW,rawOp,effOp,blendPair,groundLuma,measureLight,gradStroke,
+    paintField,paintAlphaField,boundsOf,boxesMiss,pushOff,centreOf,slideBy,keepApart,
     lineStroke,brushStroke]
     .map(function(f){ return f.toString(); }).join('\n');
 
@@ -1980,18 +2552,56 @@ function buildViewer(){
     '  ctx.fillStyle="#ffffff"; ctx.fillRect(0,0,W,H);',
     '  if (!REF_TOP) drawRef();',
     '  for (var i=0;i<layers.length;i++){ var l=layers[i]; if(!l.show) continue;',
+    '    if (l.kind === "gradient"){',
+    '      var gi=[];',
+    '      for (var gj=0;gj<l.wiggles.length;gj++){ if(!l.wiggles[gj].show) continue;',
+    '        gi.push({ w:l.wiggles[gj], pts:viewPts(l.wiggles[gj]) }); }',
+    '      if (gi.length>1) keepApart(gi, sepGap);',
+    '      buf.globalCompositeOperation="source-over"; buf.globalAlpha=1;',
+    '      buf.clearRect(0,0,W,H);',
+    '      var save=sheet; sheet=buf;',
+    '      for (var gk=0;gk<gi.length;gk++){',
+    '        var gf=grownFraction(gi[gk].w); if (gf<=0.002) continue;',
+    '        var gs = gf>=1 ? gi[gk].pts : partialPts(gi[gk].pts, gf);',
+    '        buf.globalAlpha = gi[gk].w.alpha==null?1:gi[gk].w.alpha;',
+    '        var kp=gi[gk].w.grad; gi[gk].w.grad=false;',
+    '        if (gi[gk].w.brush) brushStroke(gs, gi[gk].w, l.hue, gi[gk].squeeze);',
+    '        else lineStroke(gs, gi[gk].w, l.hue, gi[gk].squeeze);',
+    '        gi[gk].w.grad=kp; buf.globalAlpha=1; }',
+    '      sheet=save;',
+    '      sheet.globalCompositeOperation="source-over"; sheet.globalAlpha=1;',
+    '      sheet.clearRect(0,0,W,H);',
+    '      paintField(sheet, l);',
+    '      sheet.globalCompositeOperation="destination-in";',
+    '      sheet.drawImage(bufC,0,0,W,H);',
+    '      sheet.globalCompositeOperation="source-over";',
+    '      if (l.aOn) paintAlphaField(sheet, l);',
+    '      ctx.globalCompositeOperation=l.blend;',
+    '      ctx.globalAlpha = l.alpha==null?1:l.alpha;',
+    '      ctx.drawImage(sheetC,0,0,W,H); ctx.globalAlpha=1;',
+    '      continue; }',
     '    sheet.globalCompositeOperation="source-over"; sheet.globalAlpha=1;',
     '    sheet.clearRect(0,0,W,H);',
-    '    if (l.ground.show){ sheet.globalAlpha=effOp(l.ground);',
-    '      sheet.fillStyle=hsv(l.hue,100,BRI); sheet.fillRect(0,0,W,H); sheet.globalAlpha=1; }',
+    '    if (l.ground.show){ var gg=l.ground; sheet.globalAlpha=effOp(gg);',
+    '      sheet.fillStyle = (l.kind==="hsb")',
+    '        ? hsv(gg.hue==null?l.hue:gg.hue, gg.sat==null?100:gg.sat, gg.bri==null?100:gg.bri)',
+    '        : hsv(l.hue,100,BRI);',
+    '      sheet.fillRect(0,0,W,H); sheet.globalAlpha=1; }',
     '    var items=[];',
     '    for (var j=0;j<l.wiggles.length;j++){ if(!l.wiggles[j].show) continue;',
     '      items.push({ w:l.wiggles[j], pts:viewPts(l.wiggles[j]) }); }',
     '    if (items.length>1) keepApart(items, SEP.gap);',
     '    for (j=0;j<items.length;j++){',
-    '      if (items[j].w.brush) brushStroke(items[j].pts, items[j].w, l.hue, items[j].squeeze);',
-    '      else lineStroke(items[j].pts, items[j].w, l.hue, items[j].squeeze); }',
-    '    ctx.globalCompositeOperation=l.blend; ctx.drawImage(sheetC,0,0,W,H); }',
+    '      var fr=grownFraction(items[j].w); if (fr<=0.002) continue;',
+    '      var shown = fr>=1 ? items[j].pts : partialPts(items[j].pts, fr);',
+    '      sheet.globalAlpha = items[j].w.alpha==null?1:items[j].w.alpha;',
+    '      var wh=wiggleHue(l,items[j].w), wb=wiggleBri(l,items[j].w);',
+    '      if (items[j].w.brush) brushStroke(shown, items[j].w, wh, items[j].squeeze, wb);',
+    '      else lineStroke(shown, items[j].w, wh, items[j].squeeze, wb);',
+    '      sheet.globalAlpha = 1; }',
+    '    ctx.globalCompositeOperation=l.blend;',
+    '    ctx.globalAlpha = l.alpha==null?1:l.alpha;',
+    '    ctx.drawImage(sheetC,0,0,W,H); ctx.globalAlpha=1; }',
     '  ctx.globalCompositeOperation="source-over";',
     '  if (REF_TOP) drawRef();',
     '  measureLight();',
@@ -2004,6 +2614,7 @@ function buildViewer(){
     '  if (!l.show) return false;',
     '  if (l.ground.show && dv(l.ground,"opHi") > dv(l.ground,"opLo")) return true;',
     '  return l.wiggles.some(function(w){',
+    '    if (w.anim === "draw") return true;',
     '    return w.show && (dv(w,"drift")>0 || dv(w,"wDrift")>0 ||',
     '      dv(w,"satHi") > dv(w,"satLo") ||',
     '      dv(w,"tDrift")>0 || dv(w,"rDrift")>0 || dv(w,"sDrift")>0); });',
@@ -2116,8 +2727,14 @@ function projectData(){
     freshStart:freshStart, driftOff:driftOff, G:JSON.parse(JSON.stringify(G)),
     lightMin:lightMin, lightMax:lightMax,
     layers: layers.map(function(l){
-      return { hue:l.hue, blend:l.blend, mute:!!l.mute, solo:!!l.solo, open:l.open,
+      return { hue:l.hue, blend:l.blend, alpha:(l.alpha==null?1:l.alpha),
+        kind:l.kind||'paint', gAngle:l.gAngle||0,
+        gSpread:(l.gSpread==null?1:l.gSpread), gShift:l.gShift||0, gCycles:l.gCycles||1,
+        aOn:!!l.aOn, aAngle:l.aAngle||0, aFrom:(l.aFrom==null?1:l.aFrom),
+        aTo:(l.aTo==null?0:l.aTo), aCycles:l.aCycles||1,
+        mute:!!l.mute, solo:!!l.solo, open:l.open,
         ground:{ own:!!l.ground.own, opacity:l.ground.opacity,
+                 hue:l.ground.hue, sat:l.ground.sat, bri:l.ground.bri,
                  opLo:(l.ground.opLo==null?l.ground.opacity:l.ground.opLo),
                  opHi:(l.ground.opHi==null?l.ground.opacity:l.ground.opHi),
                  opSpeed:l.ground.opSpeed||1, seed:l.ground.seed||13,
@@ -2131,7 +2748,12 @@ function projectData(){
             tDrift:w.tDrift||0, rDrift:w.rDrift||0, sDrift:w.sDrift||0, tSpeed:w.tSpeed||1,
             drift:w.drift||0, speed:w.speed||1,
             brush:!!w.brush, load:w.load, swell:w.swell, bite:w.bite,
-            own:!!w.own, n:w.n, maxN:w.maxN, grow:w.grow||'both', reach:w.reach||0.08,
+            own:!!w.own, alpha:(w.alpha==null?1:w.alpha),
+            hue:w.hue, bri:w.bri, grad:!!w.grad, gradSpread:(w.gradSpread==null?1:w.gradSpread),
+            gradShift:w.gradShift||0, gradCycles:w.gradCycles||1,
+            curve:w.curve||'catmull', anim:w.anim||'drift',
+            growSpeed:w.growSpeed||0.25, growHold:(w.growHold==null?0.2:w.growHold),
+            n:w.n, maxN:w.maxN, grow:w.grow||'both', reach:w.reach||0.08,
             seedLen:w.seedLen||3, show:w.show, open:w.open,
             base: w.base.map(function(p){ return [ +p.x.toFixed(5), +p.y.toFixed(5) ]; }),
             pts:  w.pts.map(function(p){  return [ +p.x.toFixed(5), +p.y.toFixed(5) ]; }) };
@@ -2236,6 +2858,12 @@ function loadProject(text, quiet){
   layers = d.layers.map(function(L){
     var l = newLayer(pick(L.hue,60), pick(L.blend,'source-over'));
     l.mute = !!L.mute; l.solo = !!L.solo; l.open = pick(L.open, true);
+    l.alpha = pick(L.alpha, 1);
+    l.kind = pick(L.kind, 'paint');
+    l.gAngle = pick(L.gAngle, 0); l.gSpread = pick(L.gSpread, 1);
+    l.gShift = pick(L.gShift, 0); l.gCycles = pick(L.gCycles, 1);
+    l.aOn = !!L.aOn; l.aAngle = pick(L.aAngle, 90);
+    l.aFrom = pick(L.aFrom, 1); l.aTo = pick(L.aTo, 0); l.aCycles = pick(L.aCycles, 1);
     var G_ = L.ground || {};
     l.ground.opacity = pick(G_.opacity, 0.5);
     l.ground.own = !!G_.own;
@@ -2243,6 +2871,9 @@ function loadProject(text, quiet){
     l.ground.opHi = pick(G_.opHi, pick(G_.opacity, 0.5));
     l.ground.opSpeed = pick(G_.opSpeed, 1);
     l.ground.seed    = pick(G_.seed, l.ground.seed);
+    l.ground.hue = pick(G_.hue, l.hue);
+    l.ground.sat = pick(G_.sat, 100);
+    l.ground.bri = pick(G_.bri, 100);
     l.ground.show    = pick(G_.show, true);
     l.ground.open    = pick(G_.open, false);
     l.wiggles = (L.wiggles || []).map(function(Wg){
@@ -2250,9 +2881,12 @@ function loadProject(text, quiet){
       var keys = ['sat','w','wBase','tight','tx','ty','rot','scale',
                   'satLo','satHi','satSpeed','wDrift','wSpeed','drift','speed',
                   'tDrift','rDrift','sDrift','tSpeed',
-                  'load','swell','bite','n','maxN','grow','reach','seedLen'];
+                  'load','swell','bite','n','maxN','grow','reach','seedLen','curve',
+                  'anim','growSpeed','growHold','alpha',
+                  'gradSpread','gradShift','gradCycles','hue','bri'];
       keys.forEach(function(k){ if (Wg[k] !== undefined) w[k] = Wg[k]; });
       w.own = !!Wg.own;
+      w.grad = !!Wg.grad;
       w.brush = !!Wg.brush;
       w.show  = pick(Wg.show, true);
       w.open  = pick(Wg.open, false);
@@ -2361,6 +2995,19 @@ function boot(){
     layers.push(newLayer((layers[0].hue+hueStep*layers.length)%360, newBlend));
     build(); refresh();
   });
+  var bare = false;
+  var hideBtn = document.getElementById('hide');
+  hideBtn.addEventListener('click', function(){
+    bare = !bare;
+    document.body.className = (isFull ? 'full' : '') + (bare ? ' bare' : '');
+    hideBtn.textContent = bare ? 'show panel' : 'hide panel';
+    fit(); render();
+  });
+  document.addEventListener('keydown', function(e){
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    if (e.key === 'h') hideBtn.click();
+  });
+
   el.clearSolo = document.getElementById('clearSolo');
   el.clearSolo.addEventListener('click', function(){
     for (var i=0;i<layers.length;i++) layers[i].solo=false;
@@ -2396,22 +3043,46 @@ function boot(){
     e.preventDefault();
     if (dropAnchor(a.w, i)){ drag=null; build(); refresh(); }
   });
-  /* the same by holding an anchor down, for touch */
-  cv.addEventListener('pointerdown', function(e){
-    if (e.pointerType === 'mouse') return;
+  /* Holding an anchor down deletes it, finger or cursor alike.
+
+     iOS needs care here. Its own long-press gesture fires pointercancel,
+     which used to kill the timer before it ran, and a finger always
+     wanders a few pixels, which tripped the drag threshold. So the hold
+     keeps its own reference point with a looser tolerance, and a
+     cancelled pointer no longer counts against it. */
+  function startHold(x, y){
     if (!el.pts.checked) return;
     clearTimeout(holdTimer);
     var a=activeW(); if(!a) return;
-    var i=anchorAt(a.w, pos(e));
+    var i=anchorAt(a.w, { x:x, y:y });
     if (i < 0) return;
+    holdFrom = { x:x, y:y };
     holdTimer = setTimeout(function(){
-      if (moved) return;
-      if (dropAnchor(a.w, i)){ drag=null; build(); refresh(); }
-    }, 600);
+      holdTimer = null;
+      if (!holdFrom) return;
+      if (dropAnchor(a.w, i)){
+        drag = null; drawing = null; moved = true;
+        build(); refresh();
+      }
+    }, 500);
+  }
+  function endHold(){ clearTimeout(holdTimer); holdTimer = null; holdFrom = null; }
+
+  cv.addEventListener('pointerdown', function(e){ var p=pos(e); startHold(p.x, p.y); });
+  cv.addEventListener('pointerup', endHold);
+  cv.addEventListener('pointerleave', endHold);
+  cv.addEventListener('pointermove', function(e){
+    if (!holdFrom) return;
+    var p=pos(e);
+    /* a finger is never still; only a real move should cancel */
+    if (Math.hypot(p.x-holdFrom.x, p.y-holdFrom.y) > 14) endHold();
   });
-  cv.addEventListener('pointerup', function(){ clearTimeout(holdTimer); });
-  cv.addEventListener('pointercancel', function(){ clearTimeout(holdTimer); });
-  cv.addEventListener('pointermove', function(){ if (moved) clearTimeout(holdTimer); });
+  /* iOS fires this when it takes the gesture for itself — let the hold stand */
+  cv.addEventListener('pointercancel', function(){});
+  /* and stop the magnifier or selection callout appearing over the canvas */
+  cv.addEventListener('touchstart', function(e){
+    if (el.pts.checked && e.touches && e.touches.length === 1) e.preventDefault();
+  }, { passive:false });
 
   cv.addEventListener('pointerdown', onDown);
   cv.addEventListener('pointermove', onMove);
@@ -2431,9 +3102,9 @@ function boot(){
   var bd=document.getElementById('build');
   if (bd) bd.textContent = 'build ' + BUILD;
   el.note.textContent='Open a wiggle to make it active, tick anchors, then drag its dots. '+
-    'Tap the canvas to add one at the nearer end. Right-click an anchor to delete it, '+
-    'or hold it down on a touch screen. Tapping toggles fullscreen instead while that '+
-    'box is ticked.';
+    'Tap the canvas to add one at the nearer end, or draw to extend it. Hold an '+
+    'anchor down to delete it, or right-click. Tapping toggles fullscreen instead '+
+    'while that box is ticked.';
   resetAll();
   var restored = restoreAutosave();      /* picks up where the last session stopped */
   if (!restored){ build(); relayout(); refresh(); }
